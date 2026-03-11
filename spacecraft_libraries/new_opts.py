@@ -102,6 +102,7 @@ def tau_proj_nonlin_new(tau_hist, N, epsilon, sys_params: SystemParams, bc: Boun
         opts = {
             'ipopt': {
                 'print_level': 0,  # Solver verbosity level
+                'sb': "yes",
             }
         }
     else:
@@ -109,6 +110,7 @@ def tau_proj_nonlin_new(tau_hist, N, epsilon, sys_params: SystemParams, bc: Boun
             'ipopt': {
                 'max_iter': num_iter,
                 'print_level': 0,  # Solver verbosity level
+                'sb': "yes",
             }
         }
 
@@ -298,9 +300,9 @@ def opt_given_tau_ipopt_new(tau, N, epsilon, sys_params: SystemParams, bc: Bound
     nlp = {'x': opt_vars, 'f': cost, 'g': g}
 
     if num_iter is None:
-        opts = {'ipopt': {'print_level': 0}}
+        opts = {'ipopt': {'print_level': 0, 'sb': "yes"}}
     else:
-        opts = {'ipopt': {'max_iter': num_iter, 'print_level': 0}}
+        opts = {'ipopt': {'max_iter': num_iter, 'print_level': 0, 'sb': "yes"}}
 
     # Create solver instance
     solver = ca.nlpsol('solver', 'ipopt', nlp, opts)
@@ -311,7 +313,7 @@ def opt_given_tau_ipopt_new(tau, N, epsilon, sys_params: SystemParams, bc: Bound
     try:
         # Open os.devnull to redirect stdout
         with open(os.devnull, 'w') as f:
-            #sys.stdout = f  # Redirect stdout to /dev/null
+            sys.stdout = f  # Redirect stdout to /dev/null
             # Run the solver
             sol = solver(x0=opt_vars_init, lbg=lbg, ubg=ubg)
 
