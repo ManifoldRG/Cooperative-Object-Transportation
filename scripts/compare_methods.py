@@ -1,11 +1,17 @@
-from spacecraft_libraries.evaluation import ComparisonConfig, compare_methods, default_scenario
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from spacecraft_libraries.evaluation import default_scenario, run_method_comparison
 
 
-def main() -> None:
-    sys_params, bc = default_scenario()
-    config = ComparisonConfig(epsilon=1e-5, ga_pop_size=6, island_pop_size=6, island_migration_iterations=3, nlp_max_iters=3000)
-    result = compare_methods(sys_params, bc, config)
-    print(result.to_string(index=False))
+def main():
+    sys_params, bc, epsilon = default_scenario()
+    rows = run_method_comparison(sys_params, bc, epsilon)
+    print("method,cost,terminal_violation,runtime_s")
+    for row in rows:
+        print(f"{row['method']},{row['cost']:.6f},{row['terminal_violation']:.6f},{row['runtime_s']:.3f}")
 
 
 if __name__ == "__main__":

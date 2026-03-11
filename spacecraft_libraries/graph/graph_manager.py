@@ -1,85 +1,78 @@
 from __future__ import annotations
 
-import time
+from dataclasses import dataclass
 
 import networkx as nx
 import numpy as np
 from scipy.spatial.distance import cdist
 
-from spacecraft_libraries.data_structures import BoundaryConditions, SystemParams
-from spacecraft_libraries.graph.agent import SpaceAgent
-from spacecraft_libraries.new_opts import opt_given_tau_ipopt_new, tau_proj_nonlin_new
-from spacecraft_libraries.solvers.centralized_nlp import SolverRun
+from ..data_structures import BoundaryConditions, SystemParams
+from .agent import SpaceAgent
 
 
+@dataclass
 class GraphManager:
-    def __init__(
-        self,
-        attach_vecs: np.ndarray,
-        sys_params: SystemParams,
-        bc: BoundaryConditions,
-        epsilon: float,
-        line_of_sight_limit: float = 100.0,
-    ):
-        self.sys_params = sys_params
-        self.bc = bc
-        self.epsilon = epsilon
-        self.graph = nx.Graph()
+    attach_vecs: np.ndarray
+    sys_params: SystemParams
+    bc: BoundaryConditions
+    epsilon: float
+    line_of_sight_limit: float = 100.0
+    migration_rounds: int = 10
+
+    def __post_init__(self):
+        self.num_agents = self.attach_vecs.shape[0]
         self.agents = [
-            SpaceAgent(position=attach_vecs[i], agent_id=i, sys_params=sys_params, bc=bc, epsilon=epsilon)
-            for i in range(len(attach_vecs))
+            SpaceAgent(self.attach_vecs[i], i, self.sys_params, self.bc, self.epsilon)
+            for i in range(self.num_agents)
         ]
-        self.graph.add_nodes_from(range(len(self.agents)))
-        distances = cdist([a.position for a in self.agents], [a.position for a in self.agents])
-        for i in range(len(self.agents)):
-            for j in range(i + 1, len(self.agents)):
-                if 0 < distances[i, j] < line_of_sight_limit:
-                    self.graph.add_edge(i, j)
+        self.graph = nx.Graph()
+        self.graph.add_nodes_from(range(self.num_agents))
 
-    def run_island_ga(self, pop_size: int = 8, migration_iterations: int = 4) -> SolverRun:
-        t0 = time.perf_counter()
+    def build_line_of_sight_graph(self) -> None:
+        distances = cdist(self.attach_vecs, self.attach_vecs)
+        for i in range(self.num_agents):
+            neighbors = np.where((distances[i] < self.line_of_sight_limit) & (distances[i] > 0))[0]
+            self.graph.add_edges_from((i, int(j)) for j in neighbors)
+
+    def run_island_evolution(self, pop_size: int) -> None:
         for agent in self.agents:
-            agent.initialize(pop_size=pop_size)
-
-        for _ in range(migration_iterations):
+            agent.initialise_island(pop_size)
+        for _ in range(self.migration_rounds):
             for agent in self.agents:
-                agent.evolve_one_generation()
-
-            best_by_agent = {agent.agent_id: np.array(agent.best_solution, copy=True) for agent in self.agents}
-            for agent in self.agents:
-                for n in self.graph.neighbors(agent.agent_id):
-                    agent.migrants_received[n] = np.array(best_by_agent[n], copy=True)
+                agent.step_generation()
+            self._communicate_best()
             for agent in self.agents:
                 agent.inject_migrants_replace_worst()
 
-        best_tau = None
-        best_cost = np.inf
-        best_data = None
+    def _communicate_best(self) -> None:
+        best = {agent.agent_id: np.array(agent.best_solution, copy=True) for agent in self.agents}
         for agent in self.agents:
-            tau = agent.best_solution.reshape((self.sys_params.N, 3))
-            tau_proj, _ = tau_proj_nonlin_new(tau, self.sys_params.N, self.epsilon, self.sys_params, self.bc)
-            traj, ctrl, q_hist, cost = opt_given_tau_ipopt_new(
-                tau_proj,
-                self.sys_params.N,
-                self.epsilon,
-                self.sys_params,
-                self.bc,
-            )
-            if cost < best_cost:
-                best_tau = tau_proj
-                best_cost = float(cost)
-                best_data = (traj, ctrl, q_hist)
+            agent.migrants_received.clear()
+            for n in self.graph.neighbors(agent.agent_id):
+                agent.migrants_received[n] = np.array(best[n], copy=True)
 
-        if best_tau is None or best_data is None:
-            raise RuntimeError("Decentralized island GA did not produce a solution")
+    def run_consensus(self, max_iters: int = 100):
+        for agent in self.agents:
+            agent.finalize_from_tau(agent.best_solution.reshape((self.sys_params.N, 3)))
 
-        traj, ctrl, q_hist = best_data
-        runtime_s = time.perf_counter() - t0
-        return SolverRun(
-            method="decentralized_island_ga",
-            trajectory=traj.as_array(),
-            control=ctrl.U,
-            q_history=np.asarray(q_hist),
-            cost=best_cost,
-            runtime_s=runtime_s,
-        )
+        state = {agent.agent_id: (1.0 / float(agent.final_cost), agent.final_tau) for agent in self.agents}
+        nodes = list(self.graph.nodes)
+        for _ in range(max_iters):
+            updated = {
+                i: max([state[i]] + [state[j] for j in self.graph.neighbors(i)], key=lambda t: t[0])
+                for i in nodes
+            }
+            if updated == state:
+                break
+            state = updated
+
+        best_fit, best_tau = next(iter(state.values()))
+        for agent in self.agents:
+            agent.finalize_from_tau(best_tau)
+        return {
+            "fitness": best_fit,
+            "tau": best_tau,
+            "trajectory": self.agents[0].final_traj,
+            "control": self.agents[0].final_ctrl,
+            "cost": self.agents[0].final_cost,
+        }

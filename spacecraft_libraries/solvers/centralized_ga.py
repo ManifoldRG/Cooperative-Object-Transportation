@@ -3,38 +3,63 @@ from __future__ import annotations
 import time
 
 import numpy as np
+import pygad
 
-from spacecraft_libraries.data_structures import BoundaryConditions, SystemParams
-from spacecraft_libraries.genetic_code import pop_gen_new
-from spacecraft_libraries.new_opts import opt_given_tau_ipopt_new, tau_proj_nonlin_new
-from spacecraft_libraries.solvers.centralized_nlp import SolverRun
+from .. import genetic_code, new_opts
+from ..data_structures import BoundaryConditions, SystemParams
 
 
 def solve_centralized_ga(
     sys_params: SystemParams,
     bc: BoundaryConditions,
-    epsilon: float = 1e-5,
-    pop_size: int = 8,
-) -> SolverRun:
-    t0 = time.perf_counter()
-    population = pop_gen_new(bc, sys_params, sys_params.N, epsilon, pop_size=pop_size)
-    best_cost = np.inf
-    best = None
-    for tau_guess in population:
-        tau_proj, _ = tau_proj_nonlin_new(tau_guess, sys_params.N, epsilon, sys_params, bc)
-        traj, ctrl, q_hist, cost = opt_given_tau_ipopt_new(tau_proj, sys_params.N, epsilon, sys_params, bc)
-        if cost < best_cost:
-            best_cost = float(cost)
-            best = (traj, ctrl, q_hist)
-    runtime_s = time.perf_counter() - t0
-    if best is None:
-        raise RuntimeError("Centralized GA failed to produce a feasible candidate")
-    traj, ctrl, q_hist = best
-    return SolverRun(
-        method="centralized_ga",
-        trajectory=traj.as_array(),
-        control=ctrl.U,
-        q_history=np.asarray(q_hist),
-        cost=best_cost,
-        runtime_s=runtime_s,
+    epsilon: float,
+    pop_size: int = 20,
+    generations: int = 10,
+):
+    def fitness_wrapper(ga_instance, solution, solution_idx):
+        return genetic_code.fitness_func(
+            ga_instance,
+            sys_params.N,
+            epsilon,
+            sys_params,
+            bc,
+            solution,
+            solution_idx,
+        )
+
+    init_pop = genetic_code.pop_gen_new(bc, sys_params, sys_params.N, epsilon, pop_size)
+    init_pop = [candidate.flatten() for candidate in init_pop]
+
+    ga = pygad.GA(
+        num_generations=generations,
+        num_parents_mating=max(2, pop_size // 2),
+        initial_population=init_pop,
+        fitness_func=fitness_wrapper,
+        num_genes=sys_params.N * 3,
+        mutation_percent_genes=10,
+        crossover_type="two_points",
+        mutation_type="random",
+        parent_selection_type="sss",
+        keep_parents=-1,
+        keep_elitism=max(1, pop_size // 4),
+        allow_duplicate_genes=True,
     )
+
+    start = time.perf_counter()
+    ga.run()
+    runtime = time.perf_counter() - start
+
+    best_solution, _, _ = ga.best_solution()
+    tau = best_solution.reshape((sys_params.N, 3))
+    tau = new_opts.tau_proj_nonlin_new(tau, sys_params.N, epsilon, sys_params, bc)[0]
+    traj, ctrl, q, cost = new_opts.opt_given_tau_ipopt_new(tau, sys_params.N, epsilon, sys_params, bc, num_iter=3000)
+
+    return {
+        "method": "centralized_ga",
+        "tau": tau,
+        "trajectory": traj,
+        "control": ctrl,
+        "attachment": q,
+        "cost": float(cost),
+        "runtime": runtime,
+    }
