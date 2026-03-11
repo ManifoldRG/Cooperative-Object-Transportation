@@ -1,17 +1,11 @@
-from pathlib import Path
-import sys
-
-sys.path.append(str(Path(__file__).resolve().parents[1]))
-
-from cot.evaluation.comparison import compare_methods
-from cot.scenarios import scenario_two
+from spacecraft_libraries.evaluation import ComparisonConfig, compare_methods, default_scenario
 
 
-def main():
-    sys_params, bc, epsilon = scenario_two(num_steps=60)
-    rows = compare_methods(sys_params, bc, epsilon)
-    for row in rows:
-        print(row)
+def main() -> None:
+    sys_params, bc = default_scenario()
+    config = ComparisonConfig(epsilon=1e-5, ga_pop_size=6, island_pop_size=6, island_migration_iterations=3, nlp_max_iters=3000)
+    result = compare_methods(sys_params, bc, config)
+    print(result.to_string(index=False))
 
 
 if __name__ == "__main__":

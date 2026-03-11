@@ -43,3 +43,15 @@ bibtex
 }
 License: MIT
 Acknowledgements: NSF Award #203445 • City of Seattle Open Data Portal
+
+
+## Refactored package entry points
+
+- Comparison runner: `python scripts/compare_methods.py`
+- Core solver modules:
+  - `spacecraft_libraries/solvers/centralized_nlp.py`
+  - `spacecraft_libraries/solvers/centralized_ga.py`
+  - `spacecraft_libraries/solvers/decentralized_island_ga.py`
+- Decentralized island model graph logic:
+  - `spacecraft_libraries/graph/agent.py`
+  - `spacecraft_libraries/graph/graph_manager.py`

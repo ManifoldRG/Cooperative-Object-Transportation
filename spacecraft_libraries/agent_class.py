@@ -1,1 +1,3 @@
-# placevc holder for now but the classes once they work will be moved into here and the other one will be the skeleton testcode needed to run the whol st of libraries
+from spacecraft_libraries.graph.agent import SpaceAgent
+
+__all__ = ["SpaceAgent"]
