@@ -202,6 +202,61 @@ def skew_casadi(vector):
         ca.horzcat(-vector[1], vector[0], 0)
     )
 
+def hat_casadi(v):
+    """hat map: R^3 -> so(3)."""
+    return skew_casadi(v)
+
+def vee_casadi(S):
+    """vee map: so(3) -> R^3."""
+    return ca.vertcat(S[2, 1], S[0, 2], S[1, 0])
+
+def so3_exp_casadi(phi):
+    """SO(3) exponential map using Rodrigues' formula with small-angle handling."""
+    theta = ca.norm_2(phi)
+    Phi = hat_casadi(phi)
+    I3 = ca.SX.eye(3)
+
+    theta2 = theta * theta
+    theta4 = theta2 * theta2
+
+    A_small = 1 - theta2 / 6 + theta4 / 120
+    B_small = 0.5 - theta2 / 24 + theta4 / 720
+
+    A = ca.if_else(theta < 1e-6, A_small, ca.sin(theta) / theta)
+    B = ca.if_else(theta < 1e-6, B_small, (1 - ca.cos(theta)) / theta2)
+
+    return I3 + A * Phi + B * (Phi @ Phi)
+
+def so3_log_casadi(R):
+    """SO(3) logarithm map with small-angle approximation and acos clamping."""
+    tr = R[0, 0] + R[1, 1] + R[2, 2]
+    cos_theta = ca.fmin(ca.fmax((tr - 1) / 2, -1 + 1e-9), 1 - 1e-9)
+    theta = ca.acos(cos_theta)
+
+    skew_part = 0.5 * (R - R.T)
+    v_small = vee_casadi(skew_part)
+
+    sin_theta = ca.sin(theta)
+    scale = ca.if_else(ca.fabs(sin_theta) < 1e-6, 1.0, theta / sin_theta)
+    return ca.if_else(theta < 1e-6, v_small, scale * v_small)
+
+def rotational_step_casadi(state, tau, dt, I):
+    """Rigid-body rotation step on SO(3): state = [phi, omega]."""
+    phi = state[0:3]
+    omega = state[3:6]
+
+    # Torque affects angular velocity through Euler's rigid body dynamics.
+    omega_dot = ca.solve(I, tau - ca.cross(omega, I @ omega))
+    omega_next = omega + dt * omega_dot
+
+    # Lie-group attitude propagation replacing quaternion Euler + normalization.
+    R_k = so3_exp_casadi(phi)
+    R_increment = so3_exp_casadi(dt * omega)
+    R_next = R_k @ R_increment
+    phi_next = so3_log_casadi(R_next)
+
+    return ca.vertcat(phi_next, omega_next)
+
 def quat_mult_casadi(q1, q2):
     """Quaternion multiplication using CasADi."""
     w1, x1, y1, z1 = q1[0], q1[1], q1[2], q1[3]
@@ -251,17 +306,14 @@ def Phi_casadi(o, I):
 
 # Define the state derivative function using CasADi
 def rotational_derivative_casadi(state, tau, I):
-    quat = state[0:4]
-    omega = state[4:7]
+    """Rigid-body rotational derivative for state = [phi, omega]."""
+    omega = state[3:6]
 
-    # Quaternion derivative using quaternion multiplication
-    omega_quat = ca.vertcat(0, omega[0], omega[1], omega[2])
-    quat_dot = 0.5 * quat_mult_casadi(quat, omega_quat)
-
-    # Angular velocity derivative
+    # Fallback local-coordinate derivative (used only if caller integrates explicitly).
+    phi_dot = omega
     omega_dot = ca.solve(I, tau - ca.cross(omega, I @ omega))
 
-    return ca.vertcat(quat_dot, omega_dot)
+    return ca.vertcat(phi_dot, omega_dot)
 
 def smooth_norm(vec, delta):
     return ca.sqrt(ca.dot(vec, vec) + delta**2)
