@@ -5,11 +5,33 @@ import sys
 import os
 from .new_opts import tau_proj_nonlin_new, opt_given_tau_ipopt_new, opt_given_tau_cvx_new
 
+
+def _quaternion_to_phi(q):
+    """Convert quaternion [w, x, y, z] to so(3) rotation vector phi."""
+    q = np.asarray(q).flatten()
+    if q.size == 3:
+        return q
+    if q.size != 4:
+        raise ValueError("Expected boundary attitude as phi(3) or quaternion(4).")
+
+    q = q / np.linalg.norm(q)
+    w = np.clip(q[0], -1.0, 1.0)
+    v = q[1:]
+    v_norm = np.linalg.norm(v)
+
+    if v_norm < 1e-12:
+        return np.zeros(3)
+
+    angle = 2.0 * np.arctan2(v_norm, w)
+    axis = v / v_norm
+    return angle * axis
+
+
 #og version
-def multiple_shooting_optimization(a0, af, num_steps, dt_casadi, I_casadi, epsilon_casadi, num_iter=None):
+def multiple_shooting_optimization(a0, af, num_steps, dt_casadi, I_casadi, epsilon_casadi=None, num_iter=None):
     # Define CasADi variables for control inputs and states
     tau = [ca.SX.sym(f'tau_{k}', 3) for k in range(num_steps)]  # Control torques
-    state = [ca.SX.sym(f'state_{k}', 7) for k in range(num_steps + 1)]  # State (quaternion + angular velocity)
+    state = [ca.SX.sym(f'state_{k}', 6) for k in range(num_steps + 1)]  # State (phi + angular velocity)
     cost = 0
 
     for k in range(num_steps):
@@ -22,30 +44,26 @@ def multiple_shooting_optimization(a0, af, num_steps, dt_casadi, I_casadi, epsil
 
     # Initial state constraint (state[0] == a0)
     constraints.append(state[0] - a0)
-    lbg.extend([0] * 7)
-    ubg.extend([0] * 7)
+    lbg.extend([0] * 6)
+    ubg.extend([0] * 6)
 
     # Dynamics constraints using multiple shooting
     for k in range(num_steps):
         state_k = state[k]
         tau_k = tau[k]
 
-        # Propagate the state to the next step using Euler integration
-        state_k_next = state_k + dt_casadi * rotational_derivative_casadi(state_k, tau_k, I_casadi)
-
-        # Normalize the quaternion using smooth norm
-        quat_next = state_k_next[0:4] / smooth_norm(state_k_next[0:4], epsilon_casadi)
-        state_k_next_normalized = ca.vertcat(quat_next, state_k_next[4:7])
+        # Propagate the state on SO(3) using the exponential map.
+        state_k_next = rotational_step_casadi(state_k, tau_k, dt_casadi, I_casadi)
 
         # Append the dynamics constraint (ensure continuity between intervals)
-        constraints.append(state[k + 1] - state_k_next_normalized)
-        lbg.extend([0] * 7)
-        ubg.extend([0] * 7)
+        constraints.append(state[k + 1] - state_k_next)
+        lbg.extend([0] * 6)
+        ubg.extend([0] * 6)
 
     # Final state constraint (state[num_steps] == af)
     constraints.append(state[num_steps] - af)
-    lbg.extend([0] * 7)
-    ubg.extend([0] * 7)
+    lbg.extend([0] * 6)
+    ubg.extend([0] * 6)
 
     # Set up the optimization problem
     opt_vars = ca.vertcat(*tau, *state)  # Decision variables (controls + states)
@@ -60,8 +78,8 @@ def multiple_shooting_optimization(a0, af, num_steps, dt_casadi, I_casadi, epsil
     tau_upper_bound = ca.inf * np.ones(num_steps * 3)  # Set torque upper bound to 100
 
     ## For state variables, we leave them unbounded
-    state_lower_bound = -ca.inf * np.ones((num_steps + 1) * 7)  # 7 state variables per step
-    state_upper_bound = ca.inf * np.ones((num_steps + 1) * 7)
+    state_lower_bound = -ca.inf * np.ones((num_steps + 1) * 6)  # 6 state variables per step
+    state_upper_bound = ca.inf * np.ones((num_steps + 1) * 6)
 
     # Combine bounds for tau and state variables
     lbx = np.concatenate([tau_lower_bound, state_lower_bound])
@@ -116,17 +134,18 @@ def multiple_shooting_optimization(a0, af, num_steps, dt_casadi, I_casadi, epsil
 
     # Split the solution into tau and state
     tau_opt = w_opt[:num_steps * 3].reshape(num_steps, 3)  # Optimized torques
-    state_opt = w_opt[num_steps * 3:].reshape(num_steps + 1, 7)  # Optimized states
+    state_opt = w_opt[num_steps * 3:].reshape(num_steps + 1, 6)  # Optimized states
 
     return tau_opt, state_opt
 
 #cleaned ver
-def multiple_shooting_optimization_new(bc: BoundaryConditions, num_steps, dt_casadi, I_casadi, epsilon_casadi, num_iter=None):
-    a0 = np.hstack((bc.x0.eps, bc.x0.omega))
-    af = np.hstack((bc.xf.eps, bc.xf.omega))
+def multiple_shooting_optimization_new(bc: BoundaryConditions, num_steps, dt_casadi, I_casadi, epsilon_casadi=None, num_iter=None):
+    # Boundary angular state is now [phi, omega] in R^6.
+    a0 = np.hstack((_quaternion_to_phi(bc.x0.eps), bc.x0.omega))
+    af = np.hstack((_quaternion_to_phi(bc.xf.eps), bc.xf.omega))
     # Define CasADi variables for control inputs and states
     tau = [ca.SX.sym(f'tau_{k}', 3) for k in range(num_steps)]  # Control torques
-    state = [ca.SX.sym(f'state_{k}', 7) for k in range(num_steps + 1)]  # State (quaternion + angular velocity)
+    state = [ca.SX.sym(f'state_{k}', 6) for k in range(num_steps + 1)]  # State (phi + angular velocity)
     cost = 0
 
     for k in range(num_steps):
@@ -139,30 +158,26 @@ def multiple_shooting_optimization_new(bc: BoundaryConditions, num_steps, dt_cas
 
     # Initial state constraint (state[0] == a0)
     constraints.append(state[0] - a0)
-    lbg.extend([0] * 7)
-    ubg.extend([0] * 7)
+    lbg.extend([0] * 6)
+    ubg.extend([0] * 6)
 
     # Dynamics constraints using multiple shooting
     for k in range(num_steps):
         state_k = state[k]
         tau_k = tau[k]
 
-        # Propagate the state to the next step using Euler integration
-        state_k_next = state_k + dt_casadi * rotational_derivative_casadi(state_k, tau_k, I_casadi)
-
-        # Normalize the quaternion using smooth norm
-        quat_next = state_k_next[0:4] / smooth_norm(state_k_next[0:4], epsilon_casadi)
-        state_k_next_normalized = ca.vertcat(quat_next, state_k_next[4:7])
+        # Propagate the state on SO(3) using the exponential map.
+        state_k_next = rotational_step_casadi(state_k, tau_k, dt_casadi, I_casadi)
 
         # Append the dynamics constraint (ensure continuity between intervals)
-        constraints.append(state[k + 1] - state_k_next_normalized)
-        lbg.extend([0] * 7)
-        ubg.extend([0] * 7)
+        constraints.append(state[k + 1] - state_k_next)
+        lbg.extend([0] * 6)
+        ubg.extend([0] * 6)
 
     # Final state constraint (state[num_steps] == af)
     constraints.append(state[num_steps] - af)
-    lbg.extend([0] * 7)
-    ubg.extend([0] * 7)
+    lbg.extend([0] * 6)
+    ubg.extend([0] * 6)
 
     # Set up the optimization problem
     opt_vars = ca.vertcat(*tau, *state)  # Decision variables (controls + states)
@@ -177,8 +192,8 @@ def multiple_shooting_optimization_new(bc: BoundaryConditions, num_steps, dt_cas
     tau_upper_bound = ca.inf * np.ones(num_steps * 3)  # Set torque upper bound to 100
 
     ## For state variables, we leave them unbounded
-    state_lower_bound = -ca.inf * np.ones((num_steps + 1) * 7)  # 7 state variables per step
-    state_upper_bound = ca.inf * np.ones((num_steps + 1) * 7)
+    state_lower_bound = -ca.inf * np.ones((num_steps + 1) * 6)  # 6 state variables per step
+    state_upper_bound = ca.inf * np.ones((num_steps + 1) * 6)
 
     # Combine bounds for tau and state variables
     lbx = np.concatenate([tau_lower_bound, state_lower_bound])
@@ -233,7 +248,7 @@ def multiple_shooting_optimization_new(bc: BoundaryConditions, num_steps, dt_cas
 
     # Split the solution into tau and state
     tau_opt = w_opt[:num_steps * 3].reshape(num_steps, 3)  # Optimized torques
-    state_opt = w_opt[num_steps * 3:].reshape(num_steps + 1, 7)  # Optimized states
+    state_opt = w_opt[num_steps * 3:].reshape(num_steps + 1, 6)  # Optimized states
 
     return tau_opt, state_opt
 
