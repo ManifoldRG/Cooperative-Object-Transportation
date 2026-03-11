@@ -77,6 +77,17 @@ _EXPORTS: Dict[str, Tuple[str, str]] = {
     "tau_proj_nonlin_new": ("new_opts", "tau_proj_nonlin_new"),
     "opt_given_tau_ipopt_new": ("new_opts", "opt_given_tau_ipopt_new"),
     "opt_given_tau_cvx_new": ("new_opts", "opt_given_tau_cvx_new"),
+
+    # graph
+    "SpaceAgent": ("graph.agent", "SpaceAgent"),
+    "GraphManager": ("graph.graph_manager", "GraphManager"),
+    # solvers
+    "solve_centralized_nlp": ("solvers.centralized_nlp", "solve_centralized_nlp"),
+    "solve_centralized_ga": ("solvers.centralized_ga", "solve_centralized_ga"),
+    "solve_decentralized_island_ga": ("solvers.decentralized_island_ga", "solve_decentralized_island_ga"),
+    # evaluation
+    "default_scenario": ("evaluation.comparison", "default_scenario"),
+    "run_method_comparison": ("evaluation.comparison", "run_method_comparison"),
     # module export
     "animator": ("animator", None),
 }
