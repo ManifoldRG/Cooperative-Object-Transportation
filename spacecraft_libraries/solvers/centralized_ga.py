@@ -15,6 +15,7 @@ def solve_centralized_ga(
     epsilon: float,
     pop_size: int = 20,
     generations: int = 10,
+    max_runtime_s: float | None = None,
 ):
     def fitness_wrapper(ga_instance, solution, solution_idx):
         return genetic_code.fitness_func(
@@ -31,7 +32,7 @@ def solve_centralized_ga(
     init_pop = [candidate.flatten() for candidate in init_pop]
 
     ga = pygad.GA(
-        num_generations=generations,
+        num_generations=1,
         num_parents_mating=max(2, pop_size // 2),
         initial_population=init_pop,
         fitness_func=fitness_wrapper,
@@ -46,7 +47,13 @@ def solve_centralized_ga(
     )
 
     start = time.perf_counter()
-    ga.run()
+    generations_completed = 0
+    while generations_completed < generations:
+        ga.run()
+        generations_completed += 1
+        ga.initial_population = np.array(ga.population, copy=True)
+        if max_runtime_s is not None and (time.perf_counter() - start) >= max_runtime_s:
+            break
     runtime = time.perf_counter() - start
 
     best_solution, _, _ = ga.best_solution()

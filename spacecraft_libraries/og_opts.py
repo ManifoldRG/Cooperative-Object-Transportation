@@ -304,7 +304,7 @@ def seq_conv_opt(x0, xf, tf, x_hist, mu, a, e, nu, I, m, rs, bc: BoundaryConditi
 
     return r.value, v.value, epsilon.value, omega.value, qs.value, [U[i].value for i in range(6)], tau.value
 
-def full_nlp(x0, xf, tf, mu, a, e, nu, I, m, rs, N, max_iters=100):
+def full_nlp(x0, xf, tf, mu, a, e, nu, I, m, rs, N, max_iters=100, max_runtime_s=None):
     num_steps = N  # Assuming N is defined
     num_agents = len(rs)
     dt = tf / num_steps
@@ -446,8 +446,21 @@ def full_nlp(x0, xf, tf, mu, a, e, nu, I, m, rs, N, max_iters=100):
     # Solve the optimization problem
     #result = minimize(objective, U0_flat, method='SLSQP', constraints=[cons, cons_ineq],
     #                  options={'maxiter': max_iters, 'verbosity': 2})
-    result = minimize(objective, U0_flat, method='trust-constr', constraints=[eq_constraint],
-                      options={'maxiter': max_iters, 'verbose': 0})
+    opt_start = time.perf_counter()
+
+    def stop_on_timeout(_, __):
+        if max_runtime_s is None:
+            return False
+        return (time.perf_counter() - opt_start) >= max_runtime_s
+
+    result = minimize(
+        objective,
+        U0_flat,
+        method='trust-constr',
+        constraints=[eq_constraint],
+        options={'maxiter': max_iters, 'verbose': 2},
+        callback=stop_on_timeout,
+    )
     U_opt = result.x.reshape((num_agents, num_steps, 3))
 
     r_fin = np.zeros((num_steps+1,3))

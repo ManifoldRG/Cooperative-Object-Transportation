@@ -87,11 +87,23 @@ def _extract_terminal_state(result, method: str):
     return {"r": s.r, "v": s.v, "eps": s.eps, "omega": s.omega}
 
 
-def run_method_comparison(sys_params: SystemParams, bc: BoundaryConditions, epsilon: float, progress_callback=None):
-    methods = [
-        ("centralized_nlp", lambda: solve_centralized_nlp(sys_params, bc, max_iters=30)),
-        ("centralized_ga", lambda: solve_centralized_ga(sys_params, bc, epsilon, pop_size=8, generations=5)),
-        ("decentralized_island_ga", lambda: solve_decentralized_island_ga(sys_params, bc, epsilon, pop_size=8, migration_rounds=3)),
+def run_method_comparison(
+    sys_params: SystemParams,
+    bc: BoundaryConditions,
+    epsilon: float,
+    max_runtime_s: float | None = None,
+):
+    results = [
+        solve_centralized_nlp(sys_params, bc, max_iters=30, max_runtime_s=max_runtime_s),
+        solve_centralized_ga(sys_params, bc, epsilon, pop_size=8, generations=5, max_runtime_s=max_runtime_s),
+        solve_decentralized_island_ga(
+            sys_params,
+            bc,
+            epsilon,
+            pop_size=8,
+            migration_rounds=3,
+            max_runtime_s=max_runtime_s,
+        ),
     ]
 
     results = []
