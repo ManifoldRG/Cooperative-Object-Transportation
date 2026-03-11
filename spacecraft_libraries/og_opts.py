@@ -447,7 +447,7 @@ def full_nlp(x0, xf, tf, mu, a, e, nu, I, m, rs, N, max_iters=100):
     #result = minimize(objective, U0_flat, method='SLSQP', constraints=[cons, cons_ineq],
     #                  options={'maxiter': max_iters, 'verbosity': 2})
     result = minimize(objective, U0_flat, method='trust-constr', constraints=[eq_constraint],
-                      options={'maxiter': max_iters, 'verbose': 2})
+                      options={'maxiter': max_iters, 'verbose': 0})
     U_opt = result.x.reshape((num_agents, num_steps, 3))
 
     r_fin = np.zeros((num_steps+1,3))

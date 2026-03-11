@@ -237,9 +237,9 @@ def tau_proj_nonlin_new(tau_hist, N, epsilon, sys_params: SystemParams, bc: Boun
     nlp = {'x': opt_vars, 'f': cost, 'g': g}
 
     if num_iter is None:
-        opts = {'ipopt': {'print_level': 0}}
+        opts = {'ipopt': {'print_level': 0, 'sb': 'yes'}}
     else:
-        opts = {'ipopt': {'max_iter': num_iter, 'print_level': 0}}
+        opts = {'ipopt': {'max_iter': num_iter, 'print_level': 0, 'sb': 'yes'}}
 
     solver = ca.nlpsol('solver', 'ipopt', nlp, opts)
 
@@ -392,9 +392,9 @@ def opt_given_tau_ipopt_new(tau, N, epsilon, sys_params: SystemParams, bc: Bound
     nlp = {'x': opt_vars, 'f': cost, 'g': g}
 
     if num_iter is None:
-        opts = {'ipopt': {'print_level': 0}}
+        opts = {'ipopt': {'print_level': 0, 'sb': 'yes'}}
     else:
-        opts = {'ipopt': {'max_iter': num_iter, 'print_level': 0}}
+        opts = {'ipopt': {'max_iter': num_iter, 'print_level': 0, 'sb': 'yes'}}
 
     solver = ca.nlpsol('solver', 'ipopt', nlp, opts)
 

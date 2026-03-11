@@ -38,9 +38,9 @@ def _extract_terminal_state(result, method: str):
 
 def run_method_comparison(sys_params: SystemParams, bc: BoundaryConditions, epsilon: float):
     results = [
-        solve_centralized_nlp(sys_params, bc, max_iters=30),
-        solve_centralized_ga(sys_params, bc, epsilon, pop_size=8, generations=5),
-        solve_decentralized_island_ga(sys_params, bc, epsilon, pop_size=8, migration_rounds=3),
+        solve_centralized_nlp(sys_params, bc, max_iters=300),
+        solve_centralized_ga(sys_params, bc, epsilon, pop_size=10, generations=5),
+        solve_decentralized_island_ga(sys_params, bc, epsilon, pop_size=10, migration_rounds=5),
     ]
 
     table = []
