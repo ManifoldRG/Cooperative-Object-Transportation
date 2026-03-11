@@ -93,12 +93,14 @@ def multiple_shooting_optimization(a0, af, num_steps, dt_casadi, I_casadi, epsil
             'ipopt': {
                 'max_iter': num_iter,
                 'print_level': 0,  # Solver verbosity level
+                'sb': 'yes'
             }
         }
     else:
         opts = {
             'ipopt': {
                 'print_level': 0,  # Solver verbosity level
+                'sb': 'yes'
             }
         }
 
@@ -207,12 +209,14 @@ def multiple_shooting_optimization_new(bc: BoundaryConditions, num_steps, dt_cas
             'ipopt': {
                 'max_iter': num_iter,
                 'print_level': 0,  # Solver verbosity level
+                'sb': 'yes'
             }
         }
     else:
         opts = {
             'ipopt': {
                 'print_level': 0,  # Solver verbosity level
+                'sb': 'yes'
             }
         }
 
