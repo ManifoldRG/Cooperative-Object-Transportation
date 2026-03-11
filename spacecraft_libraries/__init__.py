@@ -87,6 +87,10 @@ _EXPORTS: Dict[str, Tuple[str, str]] = {
     "solve_decentralized_island_ga": ("solvers.decentralized_island_ga", "solve_decentralized_island_ga"),
     # evaluation
     "default_scenario": ("evaluation.comparison", "default_scenario"),
+    "get_scenario": ("evaluation.comparison", "get_scenario"),
+    "scenario_1": ("evaluation.comparison", "scenario_1"),
+    "scenario_2": ("evaluation.comparison", "scenario_2"),
+    "scenario_3": ("evaluation.comparison", "scenario_3"),
     "run_method_comparison": ("evaluation.comparison", "run_method_comparison"),
     # module export
     "animator": ("animator", None),
