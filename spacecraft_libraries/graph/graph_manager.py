@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 
 import networkx as nx
 import numpy as np
@@ -34,10 +35,16 @@ class GraphManager:
             neighbors = np.where((distances[i] < self.line_of_sight_limit) & (distances[i] > 0))[0]
             self.graph.add_edges_from((i, int(j)) for j in neighbors)
 
-    def run_island_evolution(self, pop_size: int) -> None:
+    def run_island_evolution(self, pop_size: int, max_runtime_s: float | None = None) -> None:
         for agent in self.agents:
             agent.initialise_island(pop_size)
+
+        start = time.perf_counter()
+        effective_limit = None if max_runtime_s is None else max_runtime_s * self.num_agents
+
         for _ in range(self.migration_rounds):
+            if effective_limit is not None and (time.perf_counter() - start) >= effective_limit:
+                break
             for agent in self.agents:
                 agent.step_generation()
             self._communicate_best()
