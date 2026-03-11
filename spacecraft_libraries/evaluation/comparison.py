@@ -1,10 +1,33 @@
 from __future__ import annotations
 
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from pathlib import Path
+
 import numpy as np
 
 from ..data_structures import BoundaryConditions, StateVector, SystemParams
 from ..solvers import solve_centralized_ga, solve_centralized_nlp, solve_decentralized_island_ga
 from .metrics import quaternion_aware_violation, terminal_violation
+
+
+@contextmanager
+def _suppress_solver_output(enabled: bool):
+    if not enabled:
+        yield
+        return
+    devnull_path = Path("/dev/null")
+    with devnull_path.open("w") as devnull:
+        with redirect_stdout(devnull), redirect_stderr(devnull):
+            yield
+
+
+def _render_loading_bar(completed: int, total: int) -> None:
+    width = 30
+    filled = int(width * completed / total)
+    bar = "#" * filled + "-" * (width - filled)
+    print(f"\rRunning solvers [{bar}] {completed}/{total}", end="", flush=True)
+    if completed == total:
+        print()
 
 
 def default_scenario() -> tuple[SystemParams, BoundaryConditions, float]:
@@ -36,12 +59,37 @@ def _extract_terminal_state(result, method: str):
     return {"r": s.r, "v": s.v, "eps": s.eps, "omega": s.omega}
 
 
-def run_method_comparison(sys_params: SystemParams, bc: BoundaryConditions, epsilon: float):
-    results = [
-        solve_centralized_nlp(sys_params, bc, max_iters=30),
-        solve_centralized_ga(sys_params, bc, epsilon, pop_size=8, generations=5),
-        solve_decentralized_island_ga(sys_params, bc, epsilon, pop_size=8, migration_rounds=3),
+def run_method_comparison(
+    sys_params: SystemParams,
+    bc: BoundaryConditions,
+    epsilon: float,
+    max_runtime_s: float | None = None,
+    show_progress: bool = False,
+    silence_solver_output: bool = True,
+):
+    solver_calls = [
+        lambda: solve_centralized_nlp(sys_params, bc, max_iters=30, max_runtime_s=max_runtime_s),
+        lambda: solve_centralized_ga(sys_params, bc, epsilon, pop_size=8, generations=5, max_runtime_s=max_runtime_s),
+        lambda: solve_decentralized_island_ga(
+            sys_params,
+            bc,
+            epsilon,
+            pop_size=8,
+            migration_rounds=3,
+            max_runtime_s=max_runtime_s,
+        ),
     ]
+
+    results = []
+    total = len(solver_calls)
+    if show_progress:
+        _render_loading_bar(0, total)
+
+    for idx, solver in enumerate(solver_calls, start=1):
+        with _suppress_solver_output(silence_solver_output):
+            results.append(solver())
+        if show_progress:
+            _render_loading_bar(idx, total)
 
     table = []
     for result in results:

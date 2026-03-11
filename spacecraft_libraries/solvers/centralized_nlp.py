@@ -8,7 +8,12 @@ from .. import og_opts
 from ..data_structures import BoundaryConditions, SystemParams
 
 
-def solve_centralized_nlp(sys_params: SystemParams, bc: BoundaryConditions, max_iters: int = 100):
+def solve_centralized_nlp(
+    sys_params: SystemParams,
+    bc: BoundaryConditions,
+    max_iters: int = 100,
+    max_runtime_s: float | None = None,
+):
     start = time.perf_counter()
     U, X, Q = og_opts.full_nlp(
         x0=bc.x0.as_array(),
@@ -23,6 +28,7 @@ def solve_centralized_nlp(sys_params: SystemParams, bc: BoundaryConditions, max_
         rs=sys_params.rs,
         N=sys_params.N,
         max_iters=max_iters,
+        max_runtime_s=max_runtime_s,
     )
     runtime = time.perf_counter() - start
     return {

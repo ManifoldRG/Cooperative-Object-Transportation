@@ -293,7 +293,6 @@ def pop_gen_new(bc:BoundaryConditions, sys_params:SystemParams,  N, epsilon,pop_
 def fitness_func(ga_instance,N,epsilon, sys_params: SystemParams, bc: BoundaryConditions, solution, solution_idx):
     # Reshape the solution into the correct tau format (num_steps x 3)
     tau = solution.reshape((N, 3))
-    print("Using Nonlinear Torque Projection")
     tau = tau_proj_nonlin_new(tau, N, epsilon, sys_params, bc)[0]
     #NOTE: 3000 kept
     traj, _,_, cost = opt_given_tau_ipopt_new(tau,N, epsilon, sys_params, bc, num_iter=3000) #outputs of this function are traj_opt, ctrl_opt, Q_opt, and min cost
@@ -305,7 +304,6 @@ def fitness_func(ga_instance,N,epsilon, sys_params: SystemParams, bc: BoundaryCo
     #fitness = 1 / (cost + (alpha*float(np.linalg.norm(fin_ang_state-expected_final_ang_state))**2))
     fitness = 1 / (cost)
 
-    print("Current Cost: " + str(cost))
     if fitness == np.inf:
       fitness = 0
     return fitness
