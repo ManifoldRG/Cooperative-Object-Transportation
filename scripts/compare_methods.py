@@ -8,7 +8,7 @@ from cot.scenarios import scenario_two
 
 
 def main():
-    sys_params, bc, epsilon = scenario_two(num_steps=8)
+    sys_params, bc, epsilon = scenario_two(num_steps=60)
     rows = compare_methods(sys_params, bc, epsilon)
     for row in rows:
         print(row)

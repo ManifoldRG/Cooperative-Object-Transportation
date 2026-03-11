@@ -17,7 +17,7 @@ def scenario_two(num_steps: int = 20) -> tuple[SystemParams, BoundaryConditions,
     bc = BoundaryConditions(
         x0=StateVector(r=np.array([1, 10, -5]), v=np.array([0, 0.5, 0]), eps=np.array([0.707, 0, 0.707, 0]), omega=np.array([0, 0.1, 0])),
         xf=StateVector(r=np.array([0, 0, 0]), v=np.array([0, 0, 0]), eps=np.array([0, 0, 0, 1]), omega=np.array([0, 0, 0])),
-        tf=60,
+        tf=600,
     )
     epsilon = 1e-12
     return sys_params, bc, epsilon
