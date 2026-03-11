@@ -14,6 +14,7 @@ def solve_decentralized_island_ga(
     epsilon: float,
     pop_size: int = 10,
     migration_rounds: int = 5,
+    max_runtime_s: float | None = None,
 ):
     manager = GraphManager(
         attach_vecs=np.array(sys_params.rs),
@@ -24,7 +25,7 @@ def solve_decentralized_island_ga(
     )
     manager.build_line_of_sight_graph()
     start = time.perf_counter()
-    manager.run_island_evolution(pop_size=pop_size)
+    manager.run_island_evolution(pop_size=pop_size, max_runtime_s=max_runtime_s)
     result = manager.run_consensus()
     runtime = time.perf_counter() - start
     result.update({"method": "decentralized_island_ga", "runtime": runtime})
