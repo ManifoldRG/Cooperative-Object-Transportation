@@ -42,7 +42,7 @@ def solve_centralized_ga(
         mutation_type="random",
         parent_selection_type="sss",
         keep_parents=-1,
-        keep_elitism=max(1, pop_size // 4),
+        keep_elitism=max(1, pop_size // 2),
         allow_duplicate_genes=True,
     )
 

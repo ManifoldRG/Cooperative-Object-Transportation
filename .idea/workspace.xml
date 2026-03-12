@@ -22,6 +22,8 @@
   "keyToString": {
     "ModuleVcsDetector.initialDetectionPerformed": "true",
     "Python.compare_methods.executor": "Run",
+    "Python.comparison.executor": "Run",
+    "Python.run_comparison.executor": "Run",
     "RunOnceActivity.ShowReadmeOnStart": "true"
   }
 }]]></component>

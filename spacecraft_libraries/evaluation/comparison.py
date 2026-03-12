@@ -4,6 +4,7 @@ from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 
 import numpy as np
+import os
 
 from ..data_structures import BoundaryConditions, StateVector, SystemParams
 from ..solvers import solve_centralized_ga, solve_centralized_nlp, solve_decentralized_island_ga
@@ -15,8 +16,7 @@ def _suppress_solver_output(enabled: bool):
     if not enabled:
         yield
         return
-    devnull_path = Path("/dev/null")
-    with devnull_path.open("w") as devnull:
+    with open(os.devnull, "w") as devnull:
         with redirect_stdout(devnull), redirect_stderr(devnull):
             yield
 
@@ -30,7 +30,7 @@ def _render_loading_bar(completed: int, total: int) -> None:
         print()
 
 
-def default_scenario() -> tuple[SystemParams, BoundaryConditions, float]:
+def scenario_1() -> tuple[SystemParams, BoundaryConditions, float]:
     rs = [np.array([0.5, 1.0, 1.5]), np.array([0.0, 0.5, 2.0]), np.array([-0.5, 1.0, -1.5])]
     sys_params = SystemParams(
         mu=3.98e14,
@@ -119,14 +119,14 @@ def run_method_comparison(
     silence_solver_output: bool = True,
 ):
     solver_calls = [
-        lambda: solve_centralized_nlp(sys_params, bc, max_iters=30, max_runtime_s=max_runtime_s),
-        lambda: solve_centralized_ga(sys_params, bc, epsilon, pop_size=8, generations=5, max_runtime_s=max_runtime_s),
+        lambda: solve_centralized_nlp(sys_params, bc, max_iters=3000, max_runtime_s=max_runtime_s),
+        lambda: solve_centralized_ga(sys_params, bc, epsilon, pop_size=10, generations=5000, max_runtime_s=max_runtime_s),
         lambda: solve_decentralized_island_ga(
             sys_params,
             bc,
             epsilon,
-            pop_size=8,
-            migration_rounds=3,
+            pop_size=5,
+            migration_rounds=5000,
             max_runtime_s=max_runtime_s,
         ),
     ]
