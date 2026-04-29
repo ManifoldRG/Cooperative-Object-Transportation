@@ -1,6 +1,6 @@
 import numpy as np
 import cvxpy as cp
-from .orbital_helpers import orbital_params
+from .orbital_helpers import orbital_params, th_psi_matrix
 from .dynamics import *
 from scipy.optimize import minimize
 from scipy.optimize import NonlinearConstraint
@@ -262,6 +262,114 @@ def tau_proj_nonlin_new(tau_hist, N, epsilon, sys_params: SystemParams, bc: Boun
 
     return tau_opt, state_opt
 
+
+def tau_proj_nonlin_quat_new(tau_hist, N, epsilon, sys_params: SystemParams, bc: BoundaryConditions, num_iter=None):
+    """Quaternion-based attitude projection of a torque history.
+
+    Mirrors :func:`tau_proj_nonlin_new` but uses a 7-DoF state ``[eps(4); omega(3)]``
+    propagated by a linear Euler step plus a smooth-norm renormalization, matching
+    the dynamics in legacy ``og_opts.tau_proj_nonlin``. Quaternion convention is
+    ``[w, x, y, z]`` consistent with ``new_opts.quat_to_rotmat``.
+    """
+    if bc.x0.eps is None or bc.xf.eps is None:
+        raise ValueError(
+            "tau_proj_nonlin_quat_new requires bc.x0.eps and bc.xf.eps "
+            "(quaternion in [w, x, y, z]); got None."
+        )
+    a0 = np.hstack((np.asarray(bc.x0.eps, dtype=float).reshape(4,), bc.x0.omega))
+    af = np.hstack((np.asarray(bc.xf.eps, dtype=float).reshape(4,), bc.xf.omega))
+    num_steps = N
+    dt = bc.tf / num_steps
+
+    I_casadi = ca.DM(sys_params.I)
+    I_inv_casadi = ca.inv(I_casadi)
+    dt_casadi = ca.DM(dt)
+    epsilon_casadi = ca.DM(epsilon)
+
+    tau = [ca.SX.sym(f'tau_{k}', 3) for k in range(num_steps)]
+    state = [ca.SX.sym(f'state_{k}', 7) for k in range(num_steps + 1)]
+
+    cost = 0
+    for k in range(num_steps):
+        cost += ca.sumsqr(tau[k] - tau_hist[k])
+
+    constraints = []
+    lbg = []
+    ubg = []
+
+    constraints.append(state[0] - a0)
+    lbg.extend([0] * 7)
+    ubg.extend([0] * 7)
+
+    for k in range(num_steps):
+        state_k = state[k]
+        tau_k = tau[k]
+
+        eps_k = state_k[0:4]
+        ome_k = state_k[4:7]
+
+        # Linear Euler step using the joint quaternion+angular-velocity Jacobian.
+        phi_block = Phi_casadi(ome_k, I_casadi)
+        rotational_update = phi_block @ ca.vertcat(eps_k, ome_k)
+        eps_pre = eps_k + dt_casadi * rotational_update[0:4]
+        ome_next = ome_k + dt_casadi * rotational_update[4:7] + dt_casadi * (I_inv_casadi @ tau_k)
+
+        # Smooth-norm renormalization to keep ||eps|| ~ 1 without a hard equality.
+        eps_next = eps_pre / smooth_norm(eps_pre, epsilon_casadi)
+
+        state_k_next = ca.vertcat(eps_next, ome_next)
+        constraints.append(state[k + 1] - state_k_next)
+        lbg.extend([0] * 7)
+        ubg.extend([0] * 7)
+
+    constraints.append(state[num_steps] - af)
+    lbg.extend([0] * 7)
+    ubg.extend([0] * 7)
+
+    opt_vars = ca.vertcat(*tau, *state)
+    g = ca.vertcat(*constraints)
+
+    lbg = np.array(lbg)
+    ubg = np.array(ubg)
+
+    tau_lower_bound = -ca.inf * np.ones(num_steps * 3)
+    tau_upper_bound = ca.inf * np.ones(num_steps * 3)
+
+    state_lower_bound = -ca.inf * np.ones((num_steps + 1) * 7)
+    state_upper_bound = ca.inf * np.ones((num_steps + 1) * 7)
+
+    lbx = np.concatenate([tau_lower_bound, state_lower_bound])
+    ubx = np.concatenate([tau_upper_bound, state_upper_bound])
+
+    nlp = {'x': opt_vars, 'f': cost, 'g': g}
+
+    if num_iter is None:
+        opts = {'ipopt': {'print_level': 0, 'sb': 'yes'}}
+    else:
+        opts = {'ipopt': {'max_iter': num_iter, 'print_level': 0, 'sb': 'yes'}}
+
+    solver = ca.nlpsol('solver', 'ipopt', nlp, opts)
+
+    original_stdout = sys.stdout
+
+    tau_init_guess = np.zeros(num_steps * 3)
+    state_init_guess = np.linspace(a0, af, num_steps + 1).flatten()
+    x0 = np.concatenate([tau_init_guess, state_init_guess])
+
+    try:
+        with open(os.devnull, 'w') as f:
+            sys.stdout = f
+            sol = solver(x0=x0, lbx=lbx, ubx=ubx, lbg=lbg, ubg=ubg)
+    finally:
+        sys.stdout = original_stdout
+
+    w_opt = sol['x'].full().flatten()
+    tau_opt = w_opt[:num_steps * 3].reshape(num_steps, 3)
+    state_opt = w_opt[num_steps * 3:].reshape(num_steps + 1, 7)
+
+    return tau_opt, state_opt
+
+
 def opt_given_tau_ipopt_new(tau, N, epsilon, sys_params: SystemParams, bc: BoundaryConditions, num_iter=None):
 
     num_steps = N
@@ -307,7 +415,10 @@ def opt_given_tau_ipopt_new(tau, N, epsilon, sys_params: SystemParams, bc: Bound
     constraints_lb.extend([0] * 3 + [0] * 3)
     constraints_ub.extend([0] * 3 + [0] * 3)
 
-    # Pre-propagate rotational state using Lie algebra coordinates.
+    # Pre-propagate rotational state using Lie algebra coordinates. Conventions:
+    # body frame for attachments and per-agent thrusts; Rs[k] rotates body to
+    # inertial. This matches cot_sdp.dynamics_exact.step exactly so a rollout
+    # through the paper's exact dynamics will agree with the inner solve.
     I = np.asarray(sys_params.I)
     I_inv = np.linalg.inv(I)
     phi = [state_attitude_to_phi(bc.x0) for _ in range(num_steps + 1)]
@@ -322,26 +433,25 @@ def opt_given_tau_ipopt_new(tau, N, epsilon, sys_params: SystemParams, bc: Bound
         Rs[k + 1] = Rs[k] @ so3_exp(dt * ome[k])
         phi[k + 1] = so3_log(Rs[k + 1])
 
-    # Build inertial attachment trajectories directly from R_k @ r_i_body.
-    qs = [np.zeros((num_steps, 3)) for _ in range(num_agents)]
-    for i in range(num_agents):
-        r_i_body = np.asarray(sys_params.rs[i])
-        for k in range(num_steps):
-            qs[i][k] = Rs[k] @ r_i_body
+    # Body-frame attachment vectors stay constant across the trajectory.
+    rs_body = [np.asarray(sys_params.rs[i], dtype=float) for i in range(num_agents)]
 
     for k in range(num_steps):
         torque_curr = ca.SX.zeros(3)
-        force_curr = ca.SX.zeros(3)
+        thrust_body = ca.SX.zeros(3)
         for i in range(num_agents):
-            Q_ik = ca.DM(qs[i][k])
+            r_body = ca.DM(rs_body[i])
             U_ik = get_U(i, k)
-            torque_curr += skew_casadi(Q_ik) @ U_ik
-            force_curr += U_ik
+            # Body-frame torque: tau_body = sum_i (r_body_i x U_body_i).
+            torque_curr += skew_casadi(r_body) @ U_ik
+            thrust_body += U_ik
 
-            dot_product = ca.dot(U_ik, Q_ik)
+            # Pointing constraint in the body frame: each agent's body-frame
+            # thrust must lie inside the cone around its body-frame attachment.
+            dot_product = ca.dot(U_ik, r_body)
             norm_U = smooth_norm(U_ik, epsilon_casadi)
-            norm_Q = smooth_norm(Q_ik, epsilon_casadi)
-            pointing_constraint = dot_product - ca.cos(nu_casadi) * norm_U * norm_Q
+            norm_r = float(np.linalg.norm(rs_body[i]))
+            pointing_constraint = dot_product - ca.cos(nu_casadi) * norm_U * norm_r
             constraints.append(pointing_constraint)
             constraints_lb.append(0)
             constraints_ub.append(ca.inf)
@@ -350,18 +460,16 @@ def opt_given_tau_ipopt_new(tau, N, epsilon, sys_params: SystemParams, bc: Bound
         constraints_lb.extend([0] * 3)
         constraints_ub.extend([0] * 3)
 
-        f, f_dot, f_ddot = orbital_params(sys_params.mu, sys_params.a, sys_params.e, k * dt)
-
-        A_vel = ca.SX.zeros(3, 6)
-        A_vel[0, :] = ca.horzcat(3 * f_dot ** 2, 0, 0, 0, 2 * f_dot, 0)
-        A_vel[1, :] = ca.horzcat(0, 0, 0, -2 * f_dot, 0, 0)
-        A_vel[2, :] = ca.horzcat(0, 0, -f_ddot, 0, 0, 0)
-        B_vel = (1 / sys_params.m) * ca.SX_eye(3)
+        # Tschauner-Hempel translational dynamics (full eccentric form), matching
+        # cot_sdp.orbital.psi_matrix and cot_sdp.dynamics_exact.step.
+        Psi_k = th_psi_matrix(sys_params.mu, sys_params.a, sys_params.e, k * dt)
+        Psi_vel = ca.DM(Psi_k[3:6, :])
+        R_k = ca.DM(Rs[k])
 
         r_k = get_r(k)
         v_k = get_v(k)
         r_next = r_k + dt * v_k
-        v_next = v_k + dt * (A_vel @ ca.vertcat(r_k, v_k) + B_vel @ force_curr)
+        v_next = v_k + dt * (Psi_vel @ ca.vertcat(r_k, v_k) + (1.0 / sys_params.m) * R_k @ thrust_body)
 
         constraints.extend([
             get_r(k + 1) - r_next,
@@ -423,7 +531,13 @@ def opt_given_tau_ipopt_new(tau, N, epsilon, sys_params: SystemParams, bc: Bound
     # Keep external compatibility by packaging quaternion attitude in StateVector.
     eps_opt = np.array([rotmat_to_quat(Rs[k]) for k in range(num_steps + 1)])
     ome_opt = np.array(ome)
-    Q_opt = np.array(qs)
+    # Reconstruct the inertial-frame attachment trajectories for back-compat
+    # with callers that expect a (num_agents, num_steps, 3) array; computed
+    # from body-frame rs and the propagated rotations Rs.
+    Q_opt = np.array([
+        np.array([Rs[k] @ rs_body[i] for k in range(num_steps)])
+        for i in range(num_agents)
+    ])
     state_list = [
         StateVector(r=r_opt[k], v=v_opt[k], eps=eps_opt[k], omega=ome_opt[k])
         for k in range(num_steps + 1)

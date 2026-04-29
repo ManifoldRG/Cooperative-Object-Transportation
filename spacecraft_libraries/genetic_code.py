@@ -294,20 +294,25 @@ def pop_gen_new(bc:BoundaryConditions, sys_params:SystemParams,  N, epsilon,pop_
     return population
 
 #clean up to use data structures
-def fitness_func(ga_instance,N,epsilon, sys_params: SystemParams, bc: BoundaryConditions, solution, solution_idx):
+def fitness_func(ga_instance,N,epsilon, sys_params: SystemParams, bc: BoundaryConditions, solution, solution_idx, projector=None):
     # Reshape the solution into the correct tau format (num_steps x 3)
     tau = solution.reshape((N, 3))
-    tau = tau_proj_nonlin_new(tau, N, epsilon, sys_params, bc)[0]
-    #NOTE: 3000 kept
-    traj, _,_, cost = opt_given_tau_ipopt_new(tau,N, epsilon, sys_params, bc, num_iter=3000) #outputs of this function are traj_opt, ctrl_opt, Q_opt, and min cost
+    if projector is None:
+        projector = tau_proj_nonlin_new
+    # Project + thrust-allocate. A bad candidate (e.g. one that drives the
+    # linear-Euler quaternion projector into a regime where the thrust-allocation
+    # IPOPT fails) must NOT take down the whole GA run — we just return zero
+    # fitness for that individual so it gets selected against.
+    try:
+        tau = projector(tau, N, epsilon, sys_params, bc)[0]
+        traj, _,_, cost = opt_given_tau_ipopt_new(tau,N, epsilon, sys_params, bc, num_iter=3000)
+    except Exception:
+        return 0.0
 
-    fin_ang_state = np.concatenate((traj.states[-1].eps, traj.states[-1].omega))
-    expected_final_ang_state = np.concatenate((bc.xf.eps, bc.xf.omega))
-    alpha=1e4
+    if not np.isfinite(cost) or cost <= 0:
+        return 0.0
 
-    #fitness = 1 / (cost + (alpha*float(np.linalg.norm(fin_ang_state-expected_final_ang_state))**2))
-    fitness = 1 / (cost)
-
+    fitness = 1 / cost
     if fitness == np.inf:
       fitness = 0
     return fitness

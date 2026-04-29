@@ -80,3 +80,30 @@ def orbital_params(mu, a, e, t, t0=0, f0=0):
     fddot = f_double_dot(n, e, f)
 
     return f, fdot, fddot
+
+
+def chief_radius(a, e, f):
+    """Instantaneous chief-orbit radius R(f) = a(1-e^2) / (1 + e cos f)."""
+    return a * (1.0 - e * e) / (1.0 + e * np.cos(f))
+
+
+def th_psi_matrix(mu, a, e, t, t0=0):
+    """Tschauner-Hempel time-varying state-transition matrix Psi(t).
+
+    State order [r(3), v(3)]^T. Mirrors ``cot_sdp.orbital.psi_matrix`` so the
+    sibling repo's translational dynamics are accurate for eccentric chief
+    orbits, not just the circular CW limit.
+
+    Returns a 6x6 numpy array.
+    """
+    f, fdot, fddot = orbital_params(mu, a, e, t, t0=t0)
+    R = chief_radius(a, e, f)
+    mu_over_R3 = mu / (R ** 3)
+    return np.array([
+        [0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+        [fdot ** 2 + 2.0 * mu_over_R3, fddot, 0.0, 0.0, 2.0 * fdot, 0.0],
+        [-fddot, fdot ** 2 - mu_over_R3, 0.0, -2.0 * fdot, 0.0, 0.0],
+        [0.0, 0.0, -mu_over_R3, 0.0, 0.0, 0.0],
+    ])

@@ -16,7 +16,15 @@ def solve_centralized_ga(
     pop_size: int = 20,
     generations: int = 10,
     max_runtime_s: float | None = None,
+    attitude: str = "so3",
 ):
+    if attitude == "so3":
+        projector = new_opts.tau_proj_nonlin_new
+    elif attitude == "quat":
+        projector = new_opts.tau_proj_nonlin_quat_new
+    else:
+        raise ValueError(f"attitude must be 'so3' or 'quat', got {attitude!r}")
+
     def fitness_wrapper(ga_instance, solution, solution_idx):
         return genetic_code.fitness_func(
             ga_instance,
@@ -26,6 +34,7 @@ def solve_centralized_ga(
             bc,
             solution,
             solution_idx,
+            projector=projector,
         )
 
     init_pop = genetic_code.pop_gen_new(bc, sys_params, sys_params.N, epsilon, pop_size)
@@ -58,11 +67,11 @@ def solve_centralized_ga(
 
     best_solution, _, _ = ga.best_solution()
     tau = best_solution.reshape((sys_params.N, 3))
-    tau = new_opts.tau_proj_nonlin_new(tau, sys_params.N, epsilon, sys_params, bc)[0]
+    tau = projector(tau, sys_params.N, epsilon, sys_params, bc)[0]
     traj, ctrl, q, cost = new_opts.opt_given_tau_ipopt_new(tau, sys_params.N, epsilon, sys_params, bc, num_iter=3000)
 
     return {
-        "method": "centralized_ga",
+        "method": f"centralized_ga_{attitude}",
         "tau": tau,
         "trajectory": traj,
         "control": ctrl,
