@@ -90,6 +90,20 @@ def so3_exp_casadi(phi):
     return ca.SX_eye(3) + A * K + B * (K @ K)
 
 
+def so3_exp_truncated2_casadi(phi):
+    """Second-order Taylor of the SO(3) exponential map: I + phi^ + 1/2 (phi^)^2.
+
+    Mirrors :func:`so3_exp_casadi` but drops the cubic and higher Taylor terms,
+    so the result is *not* in SO(3) for nonzero ``phi``. Used by
+    :func:`tau_proj_nonlin_so3_poly2_new`, which re-imposes orthogonality as a
+    hard constraint at every stage to keep the comparison against the full
+    Rodrigues exp map a fair one (kinematic-update fidelity only, no
+    off-manifold drift).
+    """
+    K = hat_casadi(phi)
+    return ca.SX_eye(3) + K + 0.5 * (K @ K)
+
+
 def so3_log_casadi(R):
     """CasADi logarithm map for SO(3).
 
@@ -266,18 +280,31 @@ def tau_proj_nonlin_new(tau_hist, N, epsilon, sys_params: SystemParams, bc: Boun
 def tau_proj_nonlin_quat_new(tau_hist, N, epsilon, sys_params: SystemParams, bc: BoundaryConditions, num_iter=None):
     """Quaternion-based attitude projection of a torque history.
 
-    Mirrors :func:`tau_proj_nonlin_new` but uses a 7-DoF state ``[eps(4); omega(3)]``
-    propagated by a linear Euler step plus a smooth-norm renormalization, matching
-    the dynamics in legacy ``og_opts.tau_proj_nonlin``. Quaternion convention is
-    ``[w, x, y, z]`` consistent with ``new_opts.quat_to_rotmat``.
+    Internal state is the 7-DoF ``[eps(4); omega(3)]`` with eps stored in
+    ``[x, y, z, w]`` order — that's the convention the 4x4 quaternion-rate
+    matrix :func:`spacecraft_libraries.dynamics.Omega` is written for (the
+    last row's ``-w_i`` factors only make sense when the scalar component
+    is in the last slot). The boundary conditions ``bc.x0.eps`` and
+    ``bc.xf.eps`` arrive in ``[w, x, y, z]`` (consistent with
+    :func:`new_opts.quat_to_rotmat`), so we shuffle to xyzw at entry.
+
+    Historical note: an earlier version packed eps as wxyz directly, which
+    is silently incompatible with Omega and produced a non-physical
+    quaternion ODE. The discrepancy was masked at small T but accumulated
+    to ~2-3 rad terminal-attitude drift at T=100, h=1.
     """
     if bc.x0.eps is None or bc.xf.eps is None:
         raise ValueError(
             "tau_proj_nonlin_quat_new requires bc.x0.eps and bc.xf.eps "
             "(quaternion in [w, x, y, z]); got None."
         )
-    a0 = np.hstack((np.asarray(bc.x0.eps, dtype=float).reshape(4,), bc.x0.omega))
-    af = np.hstack((np.asarray(bc.xf.eps, dtype=float).reshape(4,), bc.xf.omega))
+
+    def _wxyz_to_xyzw(eps_wxyz):
+        e = np.asarray(eps_wxyz, dtype=float).reshape(4,)
+        return np.array([e[1], e[2], e[3], e[0]])
+
+    a0 = np.hstack((_wxyz_to_xyzw(bc.x0.eps), bc.x0.omega))
+    af = np.hstack((_wxyz_to_xyzw(bc.xf.eps), bc.xf.omega))
     num_steps = N
     dt = bc.tf / num_steps
 
@@ -314,8 +341,13 @@ def tau_proj_nonlin_quat_new(tau_hist, N, epsilon, sys_params: SystemParams, bc:
         eps_pre = eps_k + dt_casadi * rotational_update[0:4]
         ome_next = ome_k + dt_casadi * rotational_update[4:7] + dt_casadi * (I_inv_casadi @ tau_k)
 
-        # Smooth-norm renormalization to keep ||eps|| ~ 1 without a hard equality.
-        eps_next = eps_pre / smooth_norm(eps_pre, epsilon_casadi)
+        # Hard unit-norm renormalization: eps_next = eps_pre / ||eps_pre||
+        # (the +1e-30 term is purely a divide-by-zero guard, not a smoothing
+        # regularizer). This matches the implicit-renorm form used by
+        # cot_eval.baselines.nlp_quat_euler so the GA and NLP quaternion
+        # projections enforce identical manifold feasibility — a precondition
+        # for the 6-way attitude-fidelity comparison.
+        eps_next = eps_pre / ca.sqrt(ca.sumsqr(eps_pre) + 1e-30)
 
         state_k_next = ca.vertcat(eps_next, ome_next)
         constraints.append(state[k + 1] - state_k_next)
@@ -366,6 +398,147 @@ def tau_proj_nonlin_quat_new(tau_hist, N, epsilon, sys_params: SystemParams, bc:
     w_opt = sol['x'].full().flatten()
     tau_opt = w_opt[:num_steps * 3].reshape(num_steps, 3)
     state_opt = w_opt[num_steps * 3:].reshape(num_steps + 1, 7)
+
+    return tau_opt, state_opt
+
+
+def tau_proj_nonlin_so3_poly2_new(tau_hist, N, epsilon, sys_params: SystemParams, bc: BoundaryConditions, num_iter=None):
+    """SO(3) attitude projection with the second-order truncated-Taylor exp map.
+
+    Uses the truncated Taylor as a *predictor* of the rotation update and then
+    polar-projects back onto SO(3): ``R_{k+1} = polar(R_k (I + W + 1/2 W^2))``,
+    ``W = (dt * omega_k)^``. The polar projection is the SO(3) analog of the
+    quaternion variant's ``eps_pre / ||eps_pre||`` renormalization — both are
+    nearest-element projections onto the manifold. Encoded as:
+
+        R_{k+1}^T R_{k+1} = I   (R_{k+1} ∈ SO(3))
+        R_{k+1}^T M is symmetric (polar projection of M = R_k (I + W + 1/2 W^2))
+
+    State dimension: 9 (vec R) + 3 (omega) = 12. Carrying the full rotation
+    matrix (rather than a Lie-algebra coord ``phi``) avoids the log/exp round
+    trip that would silently re-orthogonalize the truncated update before the
+    polar projection has a chance to act.
+    """
+    R0 = so3_exp(state_attitude_to_phi(bc.x0))
+    Rf = so3_exp(state_attitude_to_phi(bc.xf))
+    # IMPORTANT: pack R column-major (Fortran order) so CasADi's `ca.reshape`
+    # — which reads column-major — sees R, not R.T. Numpy's default row-major
+    # flatten silently transposes the matrix when round-tripped through
+    # ca.reshape, which under the polar-projection constraint collapses to
+    # forcing skew(I + W + 1/2 W^2) = 0 and thus omega -> 0. See the same
+    # warning in cot_eval/baselines/nlp_ipopt.py.
+    a0 = np.hstack((R0.flatten(order='F'), bc.x0.omega))
+    af = np.hstack((Rf.flatten(order='F'), bc.xf.omega))
+    num_steps = N
+    dt = bc.tf / num_steps
+
+    I_casadi = ca.DM(sys_params.I)
+    I_inv_casadi = ca.inv(I_casadi)
+    dt_casadi = ca.DM(dt)
+
+    tau = [ca.SX.sym(f'tau_{k}', 3) for k in range(num_steps)]
+    state = [ca.SX.sym(f'state_{k}', 12) for k in range(num_steps + 1)]
+
+    cost = 0
+    for k in range(num_steps):
+        cost += ca.sumsqr(tau[k] - tau_hist[k])
+
+    constraints = []
+    lbg = []
+    ubg = []
+
+    constraints.append(state[0] - a0)
+    lbg.extend([0] * 12)
+    ubg.extend([0] * 12)
+
+    for k in range(num_steps):
+        state_k = state[k]
+        state_kp1 = state[k + 1]
+        tau_k = tau[k]
+
+        R_k = ca.reshape(state_k[0:9], 3, 3)
+        ome_k = state_k[9:12]
+        R_kp1 = ca.reshape(state_kp1[0:9], 3, 3)
+        ome_kp1 = state_kp1[9:12]
+
+        ome_dot = I_inv_casadi @ (tau_k - ca.cross(ome_k, I_casadi @ ome_k))
+        ome_next = ome_k + dt_casadi * ome_dot
+
+        # Angular-velocity equality (drives state_kp1[9:12]).
+        constraints.append(ome_kp1 - ome_next)
+        lbg.extend([0] * 3)
+        ubg.extend([0] * 3)
+
+        # Truncated-Taylor predictor M = R_k (I + W + 1/2 W^2) followed by
+        # polar projection: skew(R_{k+1}^T M) = 0 → 3 indep equalities.
+        M_k = R_k @ so3_exp_truncated2_casadi(dt_casadi * ome_k)
+        QtM = R_kp1.T @ M_k
+        constraints.append(QtM[0, 1] - QtM[1, 0])
+        constraints.append(QtM[0, 2] - QtM[2, 0])
+        constraints.append(QtM[1, 2] - QtM[2, 1])
+        lbg.extend([0] * 3)
+        ubg.extend([0] * 3)
+
+    # Hard orthogonality at k = 1..N-1 (k = 0 is IC-pinned to a rotation;
+    # k = N is terminal-pinned to bc.xf.Q which is also in SO(3) — both are
+    # redundant with explicit ortho constraints there). 6 indep entries of
+    # (R^T R - I): 3 diagonal + 3 strict-upper.
+    for k in range(1, num_steps):
+        R_k = ca.reshape(state[k][0:9], 3, 3)
+        QtQ = R_k.T @ R_k
+        constraints.append(QtQ[0, 0] - 1)
+        constraints.append(QtQ[1, 1] - 1)
+        constraints.append(QtQ[2, 2] - 1)
+        constraints.append(QtQ[0, 1])
+        constraints.append(QtQ[0, 2])
+        constraints.append(QtQ[1, 2])
+        lbg.extend([0] * 6)
+        ubg.extend([0] * 6)
+
+    constraints.append(state[num_steps] - af)
+    lbg.extend([0] * 12)
+    ubg.extend([0] * 12)
+
+    opt_vars = ca.vertcat(*tau, *state)
+    g = ca.vertcat(*constraints)
+
+    lbg = np.array(lbg)
+    ubg = np.array(ubg)
+
+    tau_lower_bound = -ca.inf * np.ones(num_steps * 3)
+    tau_upper_bound = ca.inf * np.ones(num_steps * 3)
+
+    state_lower_bound = -ca.inf * np.ones((num_steps + 1) * 12)
+    state_upper_bound = ca.inf * np.ones((num_steps + 1) * 12)
+
+    lbx = np.concatenate([tau_lower_bound, state_lower_bound])
+    ubx = np.concatenate([tau_upper_bound, state_upper_bound])
+
+    nlp = {'x': opt_vars, 'f': cost, 'g': g}
+
+    if num_iter is None:
+        opts = {'ipopt': {'print_level': 0, 'sb': 'yes'}}
+    else:
+        opts = {'ipopt': {'max_iter': num_iter, 'print_level': 0, 'sb': 'yes'}}
+
+    solver = ca.nlpsol('solver', 'ipopt', nlp, opts)
+
+    original_stdout = sys.stdout
+
+    tau_init_guess = np.zeros(num_steps * 3)
+    state_init_guess = np.linspace(a0, af, num_steps + 1).flatten()
+    x0 = np.concatenate([tau_init_guess, state_init_guess])
+
+    try:
+        with open(os.devnull, 'w') as f:
+            sys.stdout = f
+            sol = solver(x0=x0, lbx=lbx, ubx=ubx, lbg=lbg, ubg=ubg)
+    finally:
+        sys.stdout = original_stdout
+
+    w_opt = sol['x'].full().flatten()
+    tau_opt = w_opt[:num_steps * 3].reshape(num_steps, 3)
+    state_opt = w_opt[num_steps * 3:].reshape(num_steps + 1, 12)
 
     return tau_opt, state_opt
 

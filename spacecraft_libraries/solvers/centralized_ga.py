@@ -17,13 +17,18 @@ def solve_centralized_ga(
     generations: int = 10,
     max_runtime_s: float | None = None,
     attitude: str = "so3",
+    timing_stats: dict | None = None,
 ):
     if attitude == "so3":
         projector = new_opts.tau_proj_nonlin_new
     elif attitude == "quat":
         projector = new_opts.tau_proj_nonlin_quat_new
+    elif attitude == "so3_poly2":
+        projector = new_opts.tau_proj_nonlin_so3_poly2_new
     else:
-        raise ValueError(f"attitude must be 'so3' or 'quat', got {attitude!r}")
+        raise ValueError(
+            f"attitude must be 'so3', 'quat', or 'so3_poly2', got {attitude!r}"
+        )
 
     def fitness_wrapper(ga_instance, solution, solution_idx):
         return genetic_code.fitness_func(
@@ -35,6 +40,7 @@ def solve_centralized_ga(
             solution,
             solution_idx,
             projector=projector,
+            timing_stats=timing_stats,
         )
 
     init_pop = genetic_code.pop_gen_new(bc, sys_params, sys_params.N, epsilon, pop_size)
@@ -67,7 +73,11 @@ def solve_centralized_ga(
 
     best_solution, _, _ = ga.best_solution()
     tau = best_solution.reshape((sys_params.N, 3))
+    _proj_t0 = time.perf_counter()
     tau = projector(tau, sys_params.N, epsilon, sys_params, bc)[0]
+    if timing_stats is not None:
+        timing_stats["total_s"] = timing_stats.get("total_s", 0.0) + (time.perf_counter() - _proj_t0)
+        timing_stats["n_calls"] = timing_stats.get("n_calls", 0) + 1
     traj, ctrl, q, cost = new_opts.opt_given_tau_ipopt_new(tau, sys_params.N, epsilon, sys_params, bc, num_iter=3000)
 
     return {

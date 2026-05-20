@@ -3,6 +3,7 @@ import casadi as ca
 from .dynamics import *
 import sys
 import os
+import time as _time
 from .new_opts import tau_proj_nonlin_new, opt_given_tau_ipopt_new, opt_given_tau_cvx_new
 
 
@@ -294,7 +295,7 @@ def pop_gen_new(bc:BoundaryConditions, sys_params:SystemParams,  N, epsilon,pop_
     return population
 
 #clean up to use data structures
-def fitness_func(ga_instance,N,epsilon, sys_params: SystemParams, bc: BoundaryConditions, solution, solution_idx, projector=None):
+def fitness_func(ga_instance,N,epsilon, sys_params: SystemParams, bc: BoundaryConditions, solution, solution_idx, projector=None, timing_stats=None):
     # Reshape the solution into the correct tau format (num_steps x 3)
     tau = solution.reshape((N, 3))
     if projector is None:
@@ -304,7 +305,11 @@ def fitness_func(ga_instance,N,epsilon, sys_params: SystemParams, bc: BoundaryCo
     # IPOPT fails) must NOT take down the whole GA run — we just return zero
     # fitness for that individual so it gets selected against.
     try:
+        _proj_t0 = _time.perf_counter()
         tau = projector(tau, N, epsilon, sys_params, bc)[0]
+        if timing_stats is not None:
+            timing_stats["total_s"] = timing_stats.get("total_s", 0.0) + (_time.perf_counter() - _proj_t0)
+            timing_stats["n_calls"] = timing_stats.get("n_calls", 0) + 1
         traj, _,_, cost = opt_given_tau_ipopt_new(tau,N, epsilon, sys_params, bc, num_iter=3000)
     except Exception:
         return 0.0
