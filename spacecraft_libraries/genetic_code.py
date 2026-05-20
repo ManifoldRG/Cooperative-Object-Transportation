@@ -142,7 +142,7 @@ def multiple_shooting_optimization(a0, af, num_steps, dt_casadi, I_casadi, epsil
     return tau_opt, state_opt
 
 #cleaned ver
-def multiple_shooting_optimization_new(bc: BoundaryConditions, num_steps, dt_casadi, I_casadi, epsilon_casadi=None, num_iter=None):
+def multiple_shooting_optimization_new(bc: BoundaryConditions, num_steps, dt_casadi, I_casadi, epsilon_casadi=None, num_iter=None, tau_init_scale: float = 1e-1):
     # Boundary angular state is now [phi, omega] in R^6.
     a0 = np.hstack((_quaternion_to_phi(bc.x0.eps), bc.x0.omega))
     af = np.hstack((_quaternion_to_phi(bc.xf.eps), bc.xf.omega))
@@ -222,7 +222,7 @@ def multiple_shooting_optimization_new(bc: BoundaryConditions, num_steps, dt_cas
         }
 
     # Define initial guess for tau and state
-    tau_init_guess = np.random.uniform(-1e-6, 1e-6, num_steps * 3)  # Random initial guess for tau
+    tau_init_guess = np.random.uniform(-tau_init_scale, tau_init_scale, num_steps * 3)
 
     # Set initial state guess based on linear interpolation between a0 and af
     state_init_guess = np.linspace(a0, af, num_steps + 1)

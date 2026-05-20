@@ -28,6 +28,18 @@ def parse_args() -> argparse.Namespace:
         default=Path("method_comparison_results.csv"),
         help="CSV output path.",
     )
+    parser.add_argument("--no-mppi", action="store_true",
+                        help="Skip MPPI methods (centralized + decentralized).")
+    parser.add_argument("--mppi-iterations", type=int, default=5,
+                        help="MPPI outer iterations per island. Each iter = N_samples inner IPOPT solves.")
+    parser.add_argument("--mppi-samples", type=int, default=10,
+                        help="MPPI samples per iteration. Total inner IPOPT calls per island = iters * samples + 1.")
+    parser.add_argument("--mppi-sigma", type=float, default=1e-1,
+                        help="MPPI tau-perturbation standard deviation.")
+    parser.add_argument("--mppi-lambda", type=float, default=1.0,
+                        help="MPPI softmin temperature on the cost.")
+    parser.add_argument("--mppi-base-seed", type=int, default=42,
+                        help="Base RNG seed; per-island seeds are base+i for the decentralized variant.")
     return parser.parse_args()
 
 
@@ -56,6 +68,12 @@ def main() -> None:
                 bc,
                 epsilon,
                 max_runtime_s=time_limit_s,
+                mppi_iterations=args.mppi_iterations,
+                mppi_samples=args.mppi_samples,
+                mppi_sigma=args.mppi_sigma,
+                mppi_lambda=args.mppi_lambda,
+                mppi_base_seed=args.mppi_base_seed,
+                include_mppi=not args.no_mppi,
             )
 
             for row in rows:

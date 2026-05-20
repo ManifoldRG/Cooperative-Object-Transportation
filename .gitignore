@@ -169,3 +169,5 @@ cython_debug/
 
 agents/ui_agent/weights
 external_data/
+# Solver output (regenerable via scripts/mppi_stress_test.py and similar)
+results/

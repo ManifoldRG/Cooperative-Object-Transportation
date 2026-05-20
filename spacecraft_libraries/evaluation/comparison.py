@@ -7,7 +7,13 @@ import numpy as np
 import os
 
 from ..data_structures import BoundaryConditions, StateVector, SystemParams
-from ..solvers import solve_centralized_ga, solve_centralized_nlp, solve_decentralized_island_ga
+from ..solvers import (
+    solve_centralized_ga,
+    solve_centralized_mppi,
+    solve_centralized_nlp,
+    solve_decentralized_island_ga,
+    solve_decentralized_mppi,
+)
 from .metrics import quaternion_aware_violation, terminal_violation
 
 
@@ -117,6 +123,12 @@ def run_method_comparison(
     max_runtime_s: float | None = None,
     show_progress: bool = False,
     silence_solver_output: bool = True,
+    mppi_iterations: int = 5,
+    mppi_samples: int = 10,
+    mppi_sigma: float = 1e-1,
+    mppi_lambda: float = 1.0,
+    mppi_base_seed: int = 42,
+    include_mppi: bool = True,
 ):
     solver_calls = [
         lambda: solve_centralized_nlp(sys_params, bc, max_iters=3000, max_runtime_s=max_runtime_s),
@@ -130,6 +142,31 @@ def run_method_comparison(
             max_runtime_s=max_runtime_s,
         ),
     ]
+    if include_mppi:
+        solver_calls.extend([
+            lambda: solve_centralized_mppi(
+                sys_params,
+                bc,
+                epsilon,
+                n_iter=mppi_iterations,
+                n_samples=mppi_samples,
+                sigma=mppi_sigma,
+                lambda_=mppi_lambda,
+                seed=mppi_base_seed,
+                max_runtime_s=max_runtime_s,
+            ),
+            lambda: solve_decentralized_mppi(
+                sys_params,
+                bc,
+                epsilon,
+                n_iter=mppi_iterations,
+                n_samples=mppi_samples,
+                sigma=mppi_sigma,
+                lambda_=mppi_lambda,
+                base_seed=mppi_base_seed,
+                max_runtime_s=max_runtime_s,
+            ),
+        ])
 
     results = []
     total = len(solver_calls)
