@@ -1,0 +1,131 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import time
+
+import networkx as nx
+import numpy as np
+from scipy.spatial.distance import cdist
+import random
+
+from ..data_structures import BoundaryConditions, SystemParams
+from .agent import SpaceAgent
+
+
+@dataclass
+class GraphManager:
+    attach_vecs: np.ndarray
+    sys_params: SystemParams
+    bc: BoundaryConditions
+    epsilon: float
+    line_of_sight_limit: float = 100.0
+    migration_rounds: int = 10
+
+    def __post_init__(self):
+        self.num_agents = self.attach_vecs.shape[0]
+        self.agents = [
+            SpaceAgent(self.attach_vecs[i], i, self.sys_params, self.bc, self.epsilon)
+            for i in range(self.num_agents)
+        ]
+        self.graph = nx.Graph()
+        self.graph.add_nodes_from(range(self.num_agents))
+
+    def build_line_of_sight_graph(self) -> None:
+        distances = cdist(self.attach_vecs, self.attach_vecs)
+        for i in range(self.num_agents):
+            neighbors = np.where((distances[i] < self.line_of_sight_limit) & (distances[i] > 0))[0]
+            self.graph.add_edges_from((i, int(j)) for j in neighbors)
+
+    def build_n_agent_rand_graph(self, num) -> None:
+        # CHANGED: replaced distance-based LoS graph with random neighbour selection
+        # each agent gets 3 random neighbours from the remaining agents
+        num_neighbours = min(num, self.num_agents - 1)  # guard for small agent counts
+        for i in range(self.num_agents):
+            others = [j for j in range(self.num_agents) if j != i]
+            chosen = random.sample(others, num_neighbours)
+            self.graph.add_edges_from((i, j) for j in chosen)
+
+    def build_coin_toss_graph(self, p: float = 0.5) -> None:
+        """Each unique agent pair is connected with probability p (Erdos-Renyi G(n,p)).
+
+        Graph topology is always re-randomised independently of any global
+        random seed set by the caller (e.g. Monte Carlo --seed flag).  This
+        is intentional: repeated runs with the same scenario seed should still
+        produce different communication graphs so results reflect the average
+        behaviour of the topology class, not one fixed instance.
+        """
+        # Use a private RNG seeded from os.urandom so this is independent of
+        # any global random.seed() call made by the Monte Carlo / scaling runner.
+        # To make the graph reproducible for debugging, replace os.urandom(8)
+        # with a fixed integer seed here.
+        import os
+        _rng = random.Random(int.from_bytes(os.urandom(8), "big"))
+
+        for i in range(self.num_agents):
+            for j in range(i + 1, self.num_agents):  # i+1 avoids duplicates and self-loops
+                if _rng.random() < p:
+                    self.graph.add_edge(i, j)
+
+        # Ensure connectivity — if any node is isolated, connect it to a random other agent
+        for i in range(self.num_agents):
+            if self.graph.degree(i) == 0:
+                j = _rng.choice([k for k in range(self.num_agents) if k != i])
+                self.graph.add_edge(i, j)
+
+
+    def run_island_evolution(self, pop_size: int, max_runtime_s: float) -> None:
+        for agent in self.agents:
+            agent.initialise_island(pop_size)
+
+        start = time.perf_counter()
+        effective_limit = None if max_runtime_s is None else max_runtime_s * self.num_agents
+
+        # for _ in range(self.migration_rounds):
+        #     if effective_limit is not None and (time.perf_counter() - start) >= effective_limit:
+        #         break
+        #     for agent in self.agents:
+        #         agent.step_generation()
+        #     self._communicate_best()
+        #     for agent in self.agents:
+        #         agent.inject_migrants_replace_worst()
+        while True:
+            if effective_limit is not None and (time.perf_counter() - start) >= effective_limit:
+                break
+            for agent in self.agents:
+                agent.step_generation()
+            self._communicate_best()
+            for agent in self.agents:
+                agent.inject_migrants_replace_worst()
+
+    def _communicate_best(self) -> None:
+        best = {agent.agent_id: np.array(agent.best_solution, copy=True) for agent in self.agents}
+        for agent in self.agents:
+            agent.migrants_received.clear()
+            for n in self.graph.neighbors(agent.agent_id):
+                agent.migrants_received[n] = np.array(best[n], copy=True)
+
+    def run_consensus(self, max_iters: int = 100):
+        for agent in self.agents:
+            agent.finalize_from_tau(agent.best_solution.reshape((self.sys_params.N, 3)))
+
+        state = {agent.agent_id: (1.0 / float(agent.final_cost), agent.final_tau) for agent in self.agents}
+        nodes = list(self.graph.nodes)
+        for _ in range(max_iters):
+            updated = {
+                i: max([state[i]] + [state[j] for j in self.graph.neighbors(i)], key=lambda t: t[0])
+                for i in nodes
+            }
+            if updated == state:
+                break
+            state = updated
+
+        best_fit, best_tau = next(iter(state.values()))
+        for agent in self.agents:
+            agent.finalize_from_tau(best_tau)
+        return {
+            "fitness": best_fit,
+            "tau": best_tau,
+            "trajectory": self.agents[0].final_traj,
+            "control": self.agents[0].final_ctrl,
+            "cost": self.agents[0].final_cost,
+        }
