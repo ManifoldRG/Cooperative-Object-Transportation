@@ -15,8 +15,8 @@ import time
 
 import numpy as np
 
-from ..data_structures import BoundaryConditions, StateVector, SystemParams
-from ..evaluation.metrics import quaternion_aware_violation, terminal_violation
+from ..data_structures import BoundaryConditions, StateVectorLie, SystemParams
+from ..evaluation.metrics import quaternion_aware_violation, terminal_violation, lie_attitude_violation
 from ..solvers.decentralized_mppi import _build_line_of_sight_graph, solve_decentralized_mppi
 from .comms import CommsBus
 from .config import RecoveryConfig
@@ -33,11 +33,12 @@ def _distribute_plan(plan: dict, controllers: list[AgentController], active_ids:
         controllers[aid].adopt_plan(tau, U[pos], ref)
 
 
-def _terminal_violation(state: StateVector, xf: StateVector) -> float:
+def _terminal_violation(state: StateVectorLie, xf: StateVectorLie) -> float:
     return (
         terminal_violation(state.r, xf.r)
         + terminal_violation(state.v, xf.v)
-        + quaternion_aware_violation(state.eps, xf.eps)
+       # + quaternion_aware_violation(state.eps, xf.eps)
+        + lie_attitude_violation(state.phi, xf.phi)
         + terminal_violation(state.omega, xf.omega)
     )
 
