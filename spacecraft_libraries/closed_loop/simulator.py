@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..data_structures import StateVector, SystemParams
-from ..new_opts import so3_exp, rotmat_to_quat, state_attitude_to_phi
+from ..data_structures import StateVectorLie, SystemParams
+from ..new_opts import so3_exp, so3_log, state_attitude_to_phi
 from ..orbital_helpers import th_psi_matrix
 
 
@@ -33,34 +33,29 @@ class PayloadSimulator:
     rotation matrix R (body->inertial), angular velocity omega (body frame).
     """
 
-    def __init__(self, sys_params: SystemParams, x0: StateVector, dt: float):
+    def __init__(self, sys_params: SystemParams, x0: StateVectorLie, dt: float):
         self.sys_params = sys_params
         self.dt = float(dt)
         self.I = np.asarray(sys_params.I, dtype=float)
         self.I_inv = np.linalg.inv(self.I)
         self.m = float(sys_params.m)
-        # Body-frame attachment vectors (constant), one per agent.
         self.rs_body = [np.asarray(r, dtype=float).reshape(3) for r in sys_params.rs]
 
         self.r = np.asarray(x0.r, dtype=float).reshape(3).copy()
         self.v = np.asarray(x0.v, dtype=float).reshape(3).copy()
-        # Initialize attitude exactly as the planner does (new_opts.py:597-600):
-        # R0 = so3_exp(state_attitude_to_phi(x0)). Using quat_to_rotmat directly
-        # would disagree for degenerate quaternions (e.g. [0,0,0,1] = 180deg about
-        # z) where the trace-based so3_log the planner relies on collapses to 0.
         self.R = so3_exp(state_attitude_to_phi(x0))
         self.omega = np.asarray(x0.omega, dtype=float).reshape(3).copy()
         self.t = 0.0
 
-    def state_vector(self) -> StateVector:
-        return StateVector(
+    def state_vector(self) -> StateVectorLie:
+        return StateVectorLie(
             r=self.r.copy(),
             v=self.v.copy(),
-            eps=rotmat_to_quat(self.R),
+            phi=so3_log(self.R),
             omega=self.omega.copy(),
         )
 
-    def step(self, agent_thrusts, active_mask, t: float | None = None) -> StateVector:
+    def step(self, agent_thrusts, active_mask, t: float | None = None) -> StateVectorLie:
         """Advance one dt under the given per-agent body-frame thrusts.
 
         agent_thrusts: list/array of (3,) body-frame thrusts, one per agent
