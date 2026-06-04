@@ -18,6 +18,7 @@ from .metrics import lie_attitude_violation, terminal_violation
 from ..solver_logger import set_scenario_context, clear_scenario_context, log_nlp_failure
 import random
 from ..new_opts import so3_log
+from ..closed_loop.faults import FaultEvent
 
 @contextmanager
 def _suppress_solver_output(enabled: bool):
@@ -324,6 +325,120 @@ def get_scenario(scenario_id: int, numagents=3) -> tuple[SystemParams, BoundaryC
 def default_scenario() -> tuple[SystemParams, BoundaryConditions, float]:
     return scenario_1()
 
+
+#    Generate random fault scenarios for testing swarm recovery simulations.
+#
+#    Supports three fault models:
+#        - random: randomly selected failed agents
+#        - localized: agents nearest a random seed fail
+#        - clustered: agents within a radius of one or more seeds fail
+#    The first returned entry is always a no-fault scenario ([]).
+#
+#
+#    Usage: 
+#        - Intened to be used after get_scenario. Here are some examples
+#           all_fault_events = random_dropout_fault_generator( sys_params, bc.tf, 10, "clustered", at_least_n_survivors=2, affected_radius=1.0 )
+#           all_fault_events = random_dropout_fault_generator( sys_params, bc.tf, 10, "random", at_least_n_survivors=2 )
+#        - then we pass the events into run_recovery_sim
+#            result = run_recovery_episode(sys_params, bc, epsilon, fault_events=fevent, cfg=cfg, verbose=True)       
+#
+#    Note:
+#        - num_seeds and affected_radius are only used by the clustered model.
+#        - trigger time is chosen randomly between [0.1 - 0.5] *tf
+def random_dropout_fault_generator(sys_params: SystemParams, 
+                                   tf: float, 
+                                   num_of_events: int=10,
+                                   fault_model: str="random",
+                                   _fault_type: str="both",
+                                   at_least_n_survivors: int=2,
+                                   num_seeds: int=2,
+                                   affected_radius: float=3.0) -> list[list[FaultEvent]]:
+    print(
+    f"[Fault Generator] "
+    f"model={fault_model}, "
+    f"events={num_of_events}, "
+    f"fault_type={_fault_type}, "
+    f"num_seeds={num_seeds}, "
+    f"affected_radius={affected_radius:.2f} m"
+    )
+
+    all_fault_model = ["random", "localized", "clustered"] # specific to fault event 
+    all_fault_type = [ "actuation", "comms", "both" ] # specific to each faulted agent
+
+    # intialize with a no fault model first
+    num_agents = len(sys_params.rs)
+    agent_ids = list(range(num_agents))
+    rs = np.asarray(sys_params.rs)
+    all_fault_events = [[]]
+
+    # check selected fault_model
+    if ( fault_model not in all_fault_model ):
+         print(f"Unknown fault model: {fault_model}. It must be one of the three \"random, localized, clustered.\"")
+         return all_fault_events
+
+     # check number of agents 
+    if ( len(sys_params.rs) <= at_least_n_survivors ):
+        return all_fault_events
+
+    for i in range(num_of_events):
+        events = []
+
+        # choose how many agents fail. At least n agents remain functional
+        max_faults = max(1, num_agents-at_least_n_survivors)
+        n_faults = random.randint(1, max_faults)
+
+        # obtain the faulted_agenets based on the fault_model
+        if ( fault_model == "random" ):
+            # randomly choose which agents fail
+            faulted_agents = random.sample(agent_ids, n_faults)
+
+        elif ( fault_model == "localized" ):
+            # fault based on physical distance
+            # Choose one random agent as the center/seed, then fault nearest agents.
+            center_agent_id = random.sample(agent_ids,1)[0]
+            center_pos = rs[center_agent_id]
+            sorted_agents = sorted(agent_ids,
+                                   key=lambda i: np.linalg.norm(rs[i] - center_pos))
+            faulted_agents = sorted_agents[:n_faults]
+
+        elif ( fault_model == "clustered" ):
+            # similar to localized model, but instead of one random seed, multiple seeds are allowed. 
+            # Consequently, the nearby agents of the seeds will also be faulted
+            # defined by num_seed , and affected_radius
+            seed_ids = random.sample( agent_ids, min(num_seeds, max_faults))
+
+            faulted_set = set(seed_ids)
+            for seed_id in seed_ids:
+                seed_pos = rs[seed_id]
+
+                for aid in agent_ids:
+                    dist = np.linalg.norm(rs[aid] - seed_pos)
+
+                    if dist <= affected_radius:
+                        faulted_set.add(aid)
+                        if len(faulted_set) >= max_faults:
+                            break
+
+                if len(list(faulted_set)) >= max_faults:
+                    break
+       
+            faulted_agents = list(faulted_set)
+
+        # generate the FaultEvent based on the collected faulted_agents
+        for agent_id in faulted_agents:
+            # choose when failure happens
+            trigger_time = random.uniform(0.1* tf, 0.5 * tf)
+
+            # choose fault_type
+            if ( _fault_type in all_fault_type ):
+                chosen_fault_type = _fault_type
+            else :
+                chosen_fault_type = all_fault_type[random.randint(0, 2)]
+            events.append( FaultEvent(agent_id=agent_id,
+                                      trigger_time=trigger_time,
+                                      fault_type=chosen_fault_type))
+        all_fault_events.append( events )
+    return all_fault_events
 
 def _extract_terminal_state(result, method: str):
     if method == "centralized_nlp":
