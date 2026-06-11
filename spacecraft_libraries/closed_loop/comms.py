@@ -26,12 +26,15 @@ class Message:
 
 
 class CommsBus:
-    def __init__(self, graph: nx.Graph, delay_steps: int = 1):
+    def __init__(self, graph: nx.Graph, agents_comm_delay_map: dict[int, int] ):
         self.graph = graph
-        self.delay_steps = int(delay_steps)
+        self.agents_comm_delay_map = agents_comm_delay_map
         self._inflight: list[Message] = []
 
-    def broadcast(self, sender: int, kind: str, payload: Any, step: int,
+    def broadcast(self, 
+                  sender: int, 
+                  kind: str, payload: Any, 
+                  step: int, 
                   comms_alive: bool = True) -> None:
         """Queue a message from ``sender`` to all its graph neighbors.
 
@@ -39,7 +42,7 @@ class CommsBus:
         """
         if not comms_alive:
             return
-        deliver = step + self.delay_steps
+        deliver = step + self.agents_comm_delay_map[sender]
         self._inflight.append(Message(sender, kind, payload, deliver))
 
     def deliver(self, step: int) -> dict[int, list[Message]]:

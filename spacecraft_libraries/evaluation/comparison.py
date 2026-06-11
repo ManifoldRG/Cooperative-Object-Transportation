@@ -325,7 +325,32 @@ def get_scenario(scenario_id: int, numagents=3) -> tuple[SystemParams, BoundaryC
 def default_scenario() -> tuple[SystemParams, BoundaryConditions, float]:
     return scenario_1()
 
+# it output a map of { agent_id : delay_time }
+# each agent can have a unique random delay time for mode="random", and non-zero extra_time_step
+def comms_delay_generator(sys_params: SystemParams, 
+                                 mode: str="fixed",
+                                 delay_time_step: int=2,
+                                 extra_time_step: int=0 ) -> dict[int,int]:
 
+    if mode not in {"fixed", "random"}:
+        raise ValueError("mode must be either fixed or random")
+
+    if delay_time_step < 0 or extra_time_step < 0:
+        raise ValueError("delay_time_step and extra_time_step must be non-negative")
+
+    num_agents = len(sys_params.rs)
+    agents_comms_delay_step_map: dict[int, int] = {}
+
+    for aid in range(num_agents):
+        if ( mode=="random" ):
+            agents_comms_delay_step_map[aid] = delay_time_step + random.randint(0,extra_time_step)
+        else:
+            agents_comms_delay_step_map[aid] = delay_time_step
+
+    return agents_comms_delay_step_map
+    
+    
+    
 #    Generate random fault scenarios for testing swarm recovery simulations.
 #
 #    Supports three fault models:
@@ -354,12 +379,12 @@ def random_dropout_fault_generator(sys_params: SystemParams,
                                    num_seeds: int=2,
                                    affected_radius: float=3.0) -> list[list[FaultEvent]]:
     print(
-    f"[Fault Generator] "
-    f"model={fault_model}, "
-    f"events={num_of_events}, "
-    f"fault_type={_fault_type}, "
-    f"num_seeds={num_seeds}, "
-    f"affected_radius={affected_radius:.2f} m"
+        f"[Fault Generator] "
+        f"model={fault_model}, "
+        f"events={num_of_events}, "
+        f"fault_type={_fault_type}, "
+        f"num_seeds={num_seeds}, "
+        f"affected_radius={affected_radius:.2f} m"
     )
 
     all_fault_model = ["random", "localized", "clustered"] # specific to fault event 

@@ -13,11 +13,12 @@ from __future__ import annotations
 import dataclasses
 import time
 
+import networkx as nx
 import numpy as np
 
 from ..data_structures import BoundaryConditions, StateVectorLie, SystemParams
 from ..evaluation.metrics import quaternion_aware_violation, terminal_violation, lie_attitude_violation
-from ..solvers.decentralized_mppi import _build_line_of_sight_graph, solve_decentralized_mppi
+from ..solvers.decentralized_mppi import _build_line_of_sight_graph_with_degree, solve_decentralized_mppi
 from .comms import CommsBus
 from .config import RecoveryConfig
 from .controller import AgentController, TRACKING, DETUMBLE, IDENTIFY, DONE, FAILED
@@ -51,14 +52,18 @@ def run_recovery_episode(
     cfg: RecoveryConfig | None = None,
     verbose: bool = False,
 ):
+    if cfg is None :
+        raise ValueError("cfg cannot be None")
+        return
+
     cfg = cfg or RecoveryConfig()
     t_start = time.perf_counter()
     dt = bc.tf / sys_params.N
     num_agents = len(sys_params.rs)
 
     fault_model = FaultModel(num_agents, fault_events)
-    graph = _build_line_of_sight_graph(np.asarray(sys_params.rs), 100.0)
-    bus = CommsBus(graph, cfg.comms_delay_steps)
+    graph = _build_line_of_sight_graph_with_degree(np.asarray(sys_params.rs), 100.0, cfg.graph_degree)
+    bus = CommsBus(graph, cfg.agents_comms_delay_step_map)
 
     controllers = [AgentController(i, sys_params.rs[i], sys_params.nu, cfg) for i in range(num_agents)]
     active_ids = list(range(num_agents))
@@ -69,6 +74,7 @@ def run_recovery_episode(
         sys_params, bc, epsilon,
         n_iter=cfg.mppi_iterations, n_samples=cfg.mppi_samples,
         sigma=cfg.mppi_sigma, lambda_=cfg.mppi_lambda, base_seed=cfg.mppi_base_seed,
+        graph_degree=cfg.graph_degree
     )
     _distribute_plan(plan, controllers, active_ids)
 
@@ -81,13 +87,15 @@ def run_recovery_episode(
     cycles = 0
     status = "running"
     identify_deadline = None  # step by which the identify round completes
-    max_steps = (sys_params.N + cfg.max_detumble_steps + cfg.comms_delay_steps + cfg.id_timeout) \
-        * (cfg.max_recovery_cycles + 2)
+    max_comms_delay_steps = max(cfg.agents_comms_delay_step_map.values(), default=0)
+    max_steps = (sys_params.N + cfg.max_detumble_steps + max_comms_delay_steps + cfg.id_timeout) * (cfg.max_recovery_cycles + 2)
 
     def _log(msg):
         log["transitions"].append((step, round(t, 3), msg))
         if verbose:
             print(f"  step {step:4d} t={t:7.2f}  {msg}")
+    
+    state_history=[]
 
     while step < max_steps:
         for aid in fault_model.update(t):
@@ -96,7 +104,7 @@ def run_recovery_episode(
 
         sensed = sim.state_vector()
         inbox = bus.deliver(step)
-
+        state_history.append(np.asarray(sensed.as_array(), dtype=float).reshape(-1))
         active_controllers = [controllers[a] for a in active_ids]
 
         # --- DEVIATION message propagation: receiving it pulls a tracker into detumble.
@@ -122,7 +130,7 @@ def run_recovery_episode(
                               fault_model.comms_alive(aid))
                 _log(f"agent {aid} -> IDENTIFY (at rest, announced {status_payload})")
                 if identify_deadline is None:
-                    identify_deadline = step + cfg.comms_delay_steps + cfg.id_timeout
+                    identify_deadline = step + max_comms_delay_steps + cfg.id_timeout
 
         # --- IDENTIFY: collect STATUS into each agent's belief.
         for aid in active_ids:
@@ -135,7 +143,7 @@ def run_recovery_episode(
         # --- IDENTIFY complete: reconcile fault set, replan over the reduced swarm.
         if (identify_deadline is not None and step >= identify_deadline
                 and all(c.mode == IDENTIFY for c in active_controllers)):
-            faulted = _reconcile_faults(controllers, active_ids)
+            faulted = _reconcile_faults(controllers, active_ids, graph)
             survivors = [a for a in active_ids if a not in faulted]
             log["removed_agents"].append((step, sorted(faulted)))
             _log(f"IDENTIFY consensus: faulted={sorted(faulted)}, survivors={survivors}")
@@ -164,13 +172,15 @@ def run_recovery_episode(
                 sys_reduced, bc_replan, epsilon,
                 n_iter=cfg.mppi_iterations, n_samples=cfg.mppi_samples,
                 sigma=cfg.mppi_sigma, lambda_=cfg.mppi_lambda, base_seed=cfg.mppi_base_seed,
+                graph_degree=cfg.graph_degree
             )
             active_ids = survivors
             _distribute_plan(plan, controllers, active_ids)
+
             # Rebuild comms over the surviving subgraph and reset the identify cycle.
-            graph = _build_line_of_sight_graph(np.asarray(rs_reduced), 100.0)
+            graph = _build_line_of_sight_graph_with_degree(np.asarray(rs_reduced), 100.0, cfg.graph_degree)
             graph = _relabel_graph(graph, survivors)
-            bus = CommsBus(graph, cfg.comms_delay_steps)
+            bus = CommsBus(graph, cfg.agents_comms_delay_step_map)
             identify_deadline = None
             for a in active_ids:
                 controllers[a]._heard = {}
@@ -198,6 +208,7 @@ def run_recovery_episode(
             break
 
     final_state = sim.state_vector()
+    state_history.append(np.asarray(final_state.as_array(), dtype=float).reshape(-1))
     viol = _terminal_violation(final_state, bc.xf)
     if status == "running":
         status = "timeout"
@@ -214,12 +225,13 @@ def run_recovery_episode(
         "final_active_agents": list(active_ids),
         "removed_agents": log["removed_agents"],
         "final_state": final_state,
+        "state_history": np.asarray(state_history),
         "log": log,
         "runtime_s": time.perf_counter() - t_start,
     }
 
 
-def _reconcile_faults(controllers: list[AgentController], active_ids: list[int]) -> set[int]:
+def _reconcile_faults(controllers: list[AgentController], active_ids: list[int], graph: nx.Graph) -> set[int]:
     """Union, across surviving agents, of agents believed faulted: an active
     agent is removed if any survivor either heard a FAULTED self-report from it
     or never heard from it within the timeout (unresponsive). Single-hop over the
@@ -228,7 +240,10 @@ def _reconcile_faults(controllers: list[AgentController], active_ids: list[int])
     faulted: set[int] = set()
     for aid in active_ids:
         heard = getattr(controllers[aid], "_heard", {})
-        for other in active_ids:
+        expected_neighbours = ( set(graph.neighbors(aid)) & set(active_ids) )
+
+        # check if agent(aid) receirves messages from its neighbours
+        for other in expected_neighbours:
             if other == aid:
                 continue
             st = heard.get(other)

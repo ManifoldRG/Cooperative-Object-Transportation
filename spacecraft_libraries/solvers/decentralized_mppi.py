@@ -20,6 +20,33 @@ from .. import new_opts
 from ..data_structures import BoundaryConditions, SystemParams
 from .mppi_core import make_nominal_tau, run_mppi
 
+# it outputs an undirected graph where each nodes has at most max_degree neghbours
+# The neighbours are added based on increasing distance order
+def _build_line_of_sight_graph_with_degree( attach_vecs: np.ndarray, limit: float, max_degree: int | None = None ) -> nx.Graph:
+    n = attach_vecs.shape[0]
+    g = nx.Graph()
+    g.add_nodes_from(range(n))
+
+    distances = cdist(attach_vecs, attach_vecs)
+
+    # distance calculation
+    candidate_edges = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            if distances[i, j] < limit:
+                candidate_edges.append((distances[i, j], i, j))
+
+    # Prefer closer communication links first
+    candidate_edges.sort(key=lambda x: x[0])
+
+    # start adding edges based on distance, and also limits the num of neighbours based on D
+    for _, i, j in candidate_edges:
+        if max_degree is None or max_degree <= 0:
+            g.add_edge(i, j)
+        else:
+            if g.degree[i] < max_degree and g.degree[j] < max_degree:
+                g.add_edge(i, j)
+    return g
 
 def _build_line_of_sight_graph(attach_vecs: np.ndarray, limit: float) -> nx.Graph:
     n = attach_vecs.shape[0]
@@ -70,11 +97,12 @@ def solve_decentralized_mppi(
     lambda_: float = 1.0,
     base_seed: int = 42,
     line_of_sight_limit: float = 100.0,
+    graph_degree: int | None = None,
     max_runtime_s: float | None = None,
 ):
     attach_vecs = np.asarray(sys_params.rs)
     num_agents = attach_vecs.shape[0]
-    graph = _build_line_of_sight_graph(attach_vecs, line_of_sight_limit)
+    graph = _build_line_of_sight_graph_with_degree(attach_vecs, line_of_sight_limit, graph_degree)
 
     start = time.perf_counter()
     # Mirror the GA's runtime-budget convention: scale by num_agents to model

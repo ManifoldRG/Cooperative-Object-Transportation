@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT))
 from spacecraft_libraries.closed_loop import RecoveryConfig, run_recovery_episode
 from spacecraft_libraries.closed_loop.faults import FaultEvent
 from spacecraft_libraries.evaluation import get_scenario
+from spacecraft_libraries.evaluation.comparison import random_scenario_generator, comms_delay_generator
 
 
 def parse_fault(spec: str) -> FaultEvent:
@@ -37,6 +38,7 @@ def parse_args():
     p.add_argument("--mppi-iterations", type=int, default=10)
     p.add_argument("--mppi-samples", type=int, default=5)
     p.add_argument("--comms-delay-steps", type=int, default=2)
+    p.add_argument("--random-extra-comms-delay-steps", type=int, default=0)
     p.add_argument("--max-recovery-cycles", type=int, default=3)
     p.add_argument("--output", type=Path, default=None, help="Optional JSON output path.")
     p.add_argument("--quiet", action="store_true")
@@ -50,7 +52,8 @@ def main():
     cfg = RecoveryConfig(
         mppi_iterations=args.mppi_iterations,
         mppi_samples=args.mppi_samples,
-        comms_delay_steps=args.comms_delay_steps,
+        agents_comms_delay_step_map=comms_delay_generator(sys_params, "fixed", args.comms_delay_steps, args.random_extra_comms_delay_steps),
+        graph_degree=3, # or randomize it here
         max_recovery_cycles=args.max_recovery_cycles,
     )
 

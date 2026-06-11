@@ -5,7 +5,7 @@ MPPI sigma sweep). Gains/tolerances scale with the scenario, so expect to tune.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -34,8 +34,9 @@ class RecoveryConfig:
     max_detumble_steps: int = 30    # safety cap so a bad-gain run can't hang
 
     # --- comms / fault identification ---
-    comms_delay_steps: int = 2
+    agents_comms_delay_step_map: dict[int, int] = field(default_factory=dict)
     id_timeout: int = 3     # steps to wait for a HEALTHY message before marking silent
+    graph_degree: int = 3
 
     # --- recovery loop ---
     max_recovery_cycles: int = 3
