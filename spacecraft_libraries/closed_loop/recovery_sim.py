@@ -225,7 +225,7 @@ def run_recovery_episode(
         "final_active_agents": list(active_ids),
         "removed_agents": log["removed_agents"],
         "final_state": final_state,
-        "state_history": np.asarray(state_history),
+        "state_history": state_history,
         "log": log,
         "runtime_s": time.perf_counter() - t_start,
     }
