@@ -145,13 +145,13 @@ def run_recovery_episode(
                 and all(c.mode == IDENTIFY for c in active_controllers)):
             faulted = _reconcile_faults(controllers, active_ids, graph)
             survivors = [a for a in active_ids if a not in faulted]
-            log["removed_agents"].append((step, sorted(faulted)))
+            log["removed_agents"].append((step, t, sorted(faulted)))
             _log(f"IDENTIFY consensus: faulted={sorted(faulted)}, survivors={survivors}")
 
             cycles += 1
             log["recovery_cycles"] = cycles
             remaining = bc.tf - t
-            if cycles > cfg.max_recovery_cycles or len(survivors) == 0 or remaining < 2 * dt:
+            if cycles > cfg.max_recovery_cycles or len(survivors) == 0 :
                 for a in active_ids:
                     controllers[a].mode = FAILED
                 status = "failed"
@@ -162,12 +162,15 @@ def run_recovery_episode(
             for a in faulted:
                 controllers[a].mode = FAILED
 
+            # Continue the mission after fault recovery by replan using only the surviving agents. 
+            # The current payload state becomes the new initial condition, but the final goal is the same.
+            # The mission duration is extended by the same final time tf and time step N.
             replan_state = sim.state_vector()
-            N_prime = max(2, int(round(remaining / dt)))
             rs_reduced = [sys_params.rs[j] for j in survivors]
-            sys_reduced = dataclasses.replace(sys_params, rs=rs_reduced, N=N_prime)
-            bc_replan = BoundaryConditions(x0=replan_state, xf=bc.xf, tf=remaining)
-            _log(f"REPLAN: survivors={survivors}, N'={N_prime}, remaining={remaining:.2f}s")
+            sys_reduced = dataclasses.replace(sys_params, rs=rs_reduced, N=sys_params.N)
+            bc_replan = BoundaryConditions(x0=replan_state, xf=bc.xf, tf=bc.tf)
+            max_steps += sys_params.N
+            _log(f"REPLAN: survivors={survivors}, N'={sys_params.N}, at mission time={t:.2f}s")
             plan = solve_decentralized_mppi(
                 sys_reduced, bc_replan, epsilon,
                 n_iter=cfg.mppi_iterations, n_samples=cfg.mppi_samples,
