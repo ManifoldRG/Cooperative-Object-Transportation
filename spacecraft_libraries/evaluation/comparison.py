@@ -128,8 +128,8 @@ def random_scenario_generator():
     Params:
     - a : semi-major axis - 1.1 - 1.3
     - e : Eccentricity - 0.01 - 0.3
-    - J : Inertia Tensor - random diagonal matrix with a maximum of 500 #change to 500
-    - m : Payload Mass - random from 1 - 500 Kgs #change to 500
+    - J : Inertia Tensor - random diagonal matrix with a maximum of 500 
+    - m : Payload Mass - random from 1 - 500 Kgs 
     - rb : Final position - random location within 1Km radius to ensure linearised dyanmics hold constant
     - epsilon_b : Final attitude quaternion - any random quaternion
     - tf : final time : random time within 1 - 10 mins # change to larger (10-60 mins)
@@ -144,8 +144,8 @@ def random_scenario_generator():
     # Eccentricity
     e = random.uniform(0.01, 0.3)
 
-    # Inertia tensor: random diagonal, each principal moment in (1, 5000)
-    diag_vals = np.array([random.uniform(1, 5000) for _ in range(3)]) # change to 500
+    # Inertia tensor: random diagonal, each principal moment in (1, 500)
+    diag_vals = np.array([random.uniform(1, 500) for _ in range(3)]) 
     # Ensure valid inertia (triangle inequality: each < sum of other two)
     diag_vals = np.sort(diag_vals)  # sort so triangle inequality is easier to satisfy
     while diag_vals[2] >= diag_vals[0] + diag_vals[1]:
@@ -153,7 +153,7 @@ def random_scenario_generator():
     J = np.diag(diag_vals)
 
     # Payload mass (kg)
-    m = random.uniform(1, 5000) # change to 500
+    m = random.uniform(1, 500) 
 
     # Final position: random point within 1km radius sphere
     r_mag = random.uniform(0, 1000)  # metres
