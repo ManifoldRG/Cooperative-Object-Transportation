@@ -128,8 +128,8 @@ def random_scenario_generator():
     Params:
     - a : semi-major axis - 1.1 - 1.3
     - e : Eccentricity - 0.01 - 0.3
-    - J : Inertia Tensor - random diagonal matrix with a maximum of 500 
-    - m : Payload Mass - random from 1 - 500 Kgs 
+    - J : Inertia Tensor - random diagonal matrix with a maximum of 500 #change to 500
+    - m : Payload Mass - random from 1 - 500 Kgs #change to 500
     - rb : Final position - random location within 1Km radius to ensure linearised dyanmics hold constant
     - epsilon_b : Final attitude quaternion - any random quaternion
     - tf : final time : random time within 1 - 10 mins # change to larger (10-60 mins)
@@ -144,8 +144,8 @@ def random_scenario_generator():
     # Eccentricity
     e = random.uniform(0.01, 0.3)
 
-    # Inertia tensor: random diagonal, each principal moment in (1, 500)
-    diag_vals = np.array([random.uniform(1, 500) for _ in range(3)]) 
+    # Inertia tensor: random diagonal, each principal moment in (1, 5000)
+    diag_vals = np.array([random.uniform(1, 500) for _ in range(3)])
     # Ensure valid inertia (triangle inequality: each < sum of other two)
     diag_vals = np.sort(diag_vals)  # sort so triangle inequality is easier to satisfy
     while diag_vals[2] >= diag_vals[0] + diag_vals[1]:
@@ -153,7 +153,7 @@ def random_scenario_generator():
     J = np.diag(diag_vals)
 
     # Payload mass (kg)
-    m = random.uniform(1, 500) 
+    m = random.uniform(1, 500)
 
     # Final position: random point within 1km radius sphere
     r_mag = random.uniform(0, 1000)  # metres
@@ -178,13 +178,13 @@ def random_scenario_generator():
     phi_b = so3_log(R)
 
     # Final time: 1–10 minutes in seconds
-    tf = random.uniform(60, 300)
+    tf = random.uniform(300, 900)
 
     # Number of agents and their positions (within 10m radius sphere)
-    n_agents = random.randint(3, 10) #! currently set to small vals for testing
+    n_agents = random.randint(3, 30) 
     rs = []
     for _ in range(n_agents):
-        mag = random.uniform(0, 10)
+        mag = random.uniform(5, 50) 
         direction = np.random.randn(3)
         direction /= np.linalg.norm(direction)
         rs.append(direction * mag)
@@ -194,11 +194,11 @@ def random_scenario_generator():
 
     epsilon = random.uniform(1e-6, 1e-4)
 
-    sys_params = SystemParams(mu=3.98e14, a=a,e=e,nu=np.pi / 4, I=J, m=m, rs=rs, N=N)
+    sys_params = SystemParams(mu=3.98e14, a=a,e=e, nu=np.pi / 2, I=J, m=m, rs=rs, N=N) #changes to pi/2
 
-    bc = BoundaryConditions( x0=StateVectorLie(r=np.array([0, 0, 0]), v=np.array([0, 0, 0]), #changed: quaternion to Twist
+    bc = BoundaryConditions( x0=StateVectorLie(r=np.array([0, 0, 0]), v=np.array([0, 0, 0]),
                                             phi=np.array([0, 0, 0]),omega=np.array([0, 0, 0]) ),
-         xf=StateVectorLie(r=rb, v=np.array([0, 0, 0]), ##note: check twist angle for final state
+         xf=StateVectorLie(r=rb, v=np.array([0, 0, 0]),
                         phi=phi_b, omega=np.array([0, 0, 0]) ), tf=tf)
 
     return sys_params, bc, epsilon
