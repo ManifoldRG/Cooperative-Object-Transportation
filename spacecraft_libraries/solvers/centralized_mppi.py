@@ -40,7 +40,7 @@ def solve_centralized_mppi(
     )
 
     traj, ctrl, q, cost = new_opts.opt_given_tau_ipopt_new(
-        best_tau, sys_params.N, epsilon, sys_params, bc, num_iter=3000
+        best_tau, sys_params.N, epsilon, sys_params, bc, num_iter=1000 #changed to 1000
     )
     runtime = time.perf_counter() - start
 
