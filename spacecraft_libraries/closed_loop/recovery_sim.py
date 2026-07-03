@@ -95,6 +95,7 @@ def run_recovery_episode(
         if verbose:
             print(f"  step {step:4d} t={t:7.2f}  {msg}")
     
+    replan_start_t = 0;
     state_history=[]
 
     while step < max_steps:
@@ -165,6 +166,7 @@ def run_recovery_episode(
             # Continue the mission after fault recovery by replan using only the surviving agents. 
             # The current payload state becomes the new initial condition, but the final goal is the same.
             # The mission duration is extended by the same final time tf and time step N.
+            replan_start_t = t
             replan_state = sim.state_vector()
             rs_reduced = [sys_params.rs[j] for j in survivors]
             sys_reduced = dataclasses.replace(sys_params, rs=rs_reduced, N=sys_params.N)
@@ -197,8 +199,8 @@ def run_recovery_episode(
         for aid in active_ids:
             if active_mask[aid]:
                 fuel += float(np.dot(thrusts[aid], thrusts[aid]))
-        sim.step(thrusts, active_mask, t)
-
+        # the replan assumes t = 0, so the advance of the simulation must also behave as if t = 0
+        sim.step(thrusts, active_mask, t - replan_start_t)
         for aid in active_ids:
             if controllers[aid].mode == TRACKING:
                 controllers[aid].advance_tracking()
