@@ -86,7 +86,7 @@ class SpaceAgent:
             self.epsilon,
             self.sys_params,
             self.bc,
-            num_iter=3000,
+            num_iter=1000, #changed to 1000
         )
         self.final_tau = projected_tau
         self.final_traj = traj
