@@ -310,7 +310,7 @@ def fitness_func(ga_instance,N,epsilon, sys_params: SystemParams, bc: BoundaryCo
         if timing_stats is not None:
             timing_stats["total_s"] = timing_stats.get("total_s", 0.0) + (_time.perf_counter() - _proj_t0)
             timing_stats["n_calls"] = timing_stats.get("n_calls", 0) + 1
-        traj, _,_, cost = opt_given_tau_ipopt_new(tau,N, epsilon, sys_params, bc, num_iter=3000)
+        traj, _,_, cost = opt_given_tau_ipopt_new(tau,N, epsilon, sys_params, bc, num_iter=1000) #changed to 1000
     except Exception:
         return 0.0
 
