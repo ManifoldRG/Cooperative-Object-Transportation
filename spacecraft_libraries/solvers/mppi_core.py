@@ -92,7 +92,7 @@ def evaluate_tau(
         tau_proj = new_opts.tau_proj_nonlin_new(tau, N, epsilon, sys_params, bc)[0]
         tau_proj = np.asarray(tau_proj, dtype=float).reshape(N, 3)
         _, _, _, cost = new_opts.opt_given_tau_ipopt_new(
-            tau_proj, N, epsilon, sys_params, bc, num_iter=3000
+            tau_proj, N, epsilon, sys_params, bc, num_iter=1000 #changed to 1000
         )
         cost = float(cost)
         if not np.isfinite(cost) or cost <= 0:
