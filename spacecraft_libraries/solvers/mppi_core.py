@@ -89,7 +89,9 @@ def evaluate_tau(
     """
     N = sys_params.N
     try:
-        tau_proj = new_opts.tau_proj_nonlin_new(tau, N, epsilon, sys_params, bc)[0]
+        tau_proj = new_opts.tau_proj_nonlin_new(tau, N, epsilon, sys_params, bc, allow_raising_error=True )[0]
+        if tau_proj is None :
+            return np.asarray(tau, dtype=float).reshape(N, 3), float("inf")
         tau_proj = np.asarray(tau_proj, dtype=float).reshape(N, 3)
         _, _, _, cost = new_opts.opt_given_tau_ipopt_new(
             tau_proj, N, epsilon, sys_params, bc, num_iter=1000 #changed to 1000

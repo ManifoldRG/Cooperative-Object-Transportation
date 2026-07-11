@@ -178,7 +178,7 @@ def state_attitude_to_phi(x):
     return so3_log(quat_to_rotmat(x.eps))
 
 #cleand?
-def tau_proj_nonlin_new(tau_hist, N, epsilon, sys_params: SystemParams, bc: BoundaryConditions, num_iter=None):
+def tau_proj_nonlin_new(tau_hist, N, epsilon, sys_params: SystemParams, bc: BoundaryConditions, num_iter=None, allow_raising_error=False):
     phi0 = state_attitude_to_phi(bc.x0)
     phif = state_attitude_to_phi(bc.xf)
     a0 = np.hstack((phi0, bc.x0.omega))
@@ -243,8 +243,15 @@ def tau_proj_nonlin_new(tau_hist, N, epsilon, sys_params: SystemParams, bc: Boun
     tau_lower_bound = -ca.inf * np.ones(num_steps * 3)
     tau_upper_bound = ca.inf * np.ones(num_steps * 3)
 
-    state_lower_bound = -ca.inf * np.ones((num_steps + 1) * 6)
-    state_upper_bound = ca.inf * np.ones((num_steps + 1) * 6)
+    # Keep phi and omega away from huge values
+    phi_bound = np.pi - 1e-3 # avoid exact pi
+    omega_bound = 2 * (np.pi - 1e-3) / dt
+    one_state_lb = np.array([ -phi_bound, -phi_bound, -phi_bound,
+                              -omega_bound, -omega_bound, -omega_bound])
+    one_state_ub = np.array([ phi_bound, phi_bound, phi_bound,
+                              omega_bound, omega_bound, omega_bound])
+    state_lower_bound = np.tile(one_state_lb, num_steps + 1)
+    state_upper_bound = np.tile(one_state_ub, num_steps + 1)
 
     lbx = np.concatenate([tau_lower_bound, state_lower_bound])
     ubx = np.concatenate([tau_upper_bound, state_upper_bound])
@@ -256,8 +263,8 @@ def tau_proj_nonlin_new(tau_hist, N, epsilon, sys_params: SystemParams, bc: Boun
     else:
         opts = {'ipopt': {'max_iter': num_iter, 'print_level': 0, 'sb': 'yes'}}
 
-    solver = ca.nlpsol('solver', 'ipopt', nlp, opts)
-
+    solver = ca.nlpsol('tau_proj_solver', 'ipopt', nlp, opts)
+ 
     original_stdout = sys.stdout
 
     tau_init_guess = np.zeros(num_steps * 3)
@@ -270,6 +277,11 @@ def tau_proj_nonlin_new(tau_hist, N, epsilon, sys_params: SystemParams, bc: Boun
             sol = solver(x0=x0, lbx=lbx, ubx=ubx, lbg=lbg, ubg=ubg)
     finally:
         sys.stdout = original_stdout
+
+    # get status to determine if the solver succeeded
+    status = solver.stats().get("return_status", "unknown")
+    if status not in {"Solve_Succeeded", "Solved_To_Acceptable_Level"} and allow_raising_error:
+       return None, _
 
     w_opt = sol['x'].full().flatten()
     tau_opt = w_opt[:num_steps * 3].reshape(num_steps, 3)
@@ -674,11 +686,11 @@ def opt_given_tau_ipopt_new(tau, N, epsilon, sys_params: SystemParams, bc: Bound
     nlp = {'x': opt_vars, 'f': cost, 'g': g}
 
     if num_iter is None:
-        opts = {'ipopt': {'print_level': 0, 'sb': 'yes'}}
+        opts = {"print_time": False, 'ipopt': {'print_level': 0, 'sb': 'yes'}}
     else:
-        opts = {'ipopt': {'max_iter': num_iter, 'print_level': 0, 'sb': 'yes'}}
+        opts = {"print_time": False,'ipopt': {'max_iter': num_iter, 'print_level': 0, 'sb': 'yes'}}
 
-    solver = ca.nlpsol('solver', 'ipopt', nlp, opts)
+    solver = ca.nlpsol('given_tau_ipopt', 'ipopt', nlp, opts)
 
     original_stdout = sys.stdout
 
