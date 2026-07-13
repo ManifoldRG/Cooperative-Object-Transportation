@@ -74,7 +74,7 @@ def run_recovery_episode(
         sys_params, bc, epsilon,
         n_iter=cfg.mppi_iterations, n_samples=cfg.mppi_samples,
         sigma=cfg.mppi_sigma, lambda_=cfg.mppi_lambda, base_seed=cfg.mppi_base_seed,
-        graph_degree=cfg.graph_degree
+        graph_degree=cfg.graph_degree,
     )
     _distribute_plan(plan, controllers, active_ids)
 
@@ -108,88 +108,89 @@ def run_recovery_episode(
         state_history.append(np.asarray(sensed.as_array(), dtype=float).reshape(-1))
         active_controllers = [controllers[a] for a in active_ids]
 
-        # --- DEVIATION message propagation: receiving it pulls a tracker into detumble.
-        for aid in active_ids:
-            c = controllers[aid]
-            if c.mode == TRACKING and any(m.kind == "DEVIATION" for m in inbox.get(aid, [])):
-                c.enter_detumble()
-                _log(f"agent {aid} -> DETUMBLE (received DEVIATION)")
+        if len(fault_events) > 0 :
+            # --- DEVIATION message propagation: receiving it pulls a tracker into detumble.
+            for aid in active_ids:
+                c = controllers[aid]
+                if c.mode == TRACKING and any(m.kind == "DEVIATION" for m in inbox.get(aid, [])):
+                    c.enter_detumble()
+                    _log(f"agent {aid} -> DETUMBLE (received DEVIATION)")
 
-        # --- TRACKING: deviation checks (self-detection).
-        for aid in active_ids:
-            c = controllers[aid]
-            if c.mode == TRACKING and c.check_tracking_deviation(sensed):
-                bus.broadcast(aid, "DEVIATION", None, step, fault_model.comms_alive(aid))
-                _log(f"agent {aid} -> DETUMBLE (deviation detected)")
+            # --- TRACKING: deviation checks (self-detection).
+            for aid in active_ids:
+                c = controllers[aid]
+                if c.mode == TRACKING and c.check_tracking_deviation(sensed):
+                    bus.broadcast(aid, "DEVIATION", None, step, fault_model.comms_alive(aid))
+                    _log(f"agent {aid} -> DETUMBLE (deviation detected)")
 
-        # --- DETUMBLE: rest checks; on reaching rest, enter IDENTIFY and announce status.
-        for aid in active_ids:
-            c = controllers[aid]
-            if c.mode == DETUMBLE and c.update_detumble(sensed):
-                status_payload = "FAULTED" if not fault_model.actuation_alive(aid) else "HEALTHY"
-                bus.broadcast(aid, "STATUS", (aid, status_payload), step,
-                              fault_model.comms_alive(aid))
-                _log(f"agent {aid} -> IDENTIFY (at rest, announced {status_payload})")
-                if identify_deadline is None:
-                    identify_deadline = step + max_comms_delay_steps + cfg.id_timeout
+            # --- DETUMBLE: rest checks; on reaching rest, enter IDENTIFY and announce status.
+            for aid in active_ids:
+                c = controllers[aid]
+                if c.mode == DETUMBLE and c.update_detumble(sensed):
+                    status_payload = "FAULTED" if not fault_model.actuation_alive(aid) else "HEALTHY"
+                    bus.broadcast(aid, "STATUS", (aid, status_payload), step,
+                                  fault_model.comms_alive(aid))
+                    _log(f"agent {aid} -> IDENTIFY (at rest, announced {status_payload})")
+                    if identify_deadline is None:
+                        identify_deadline = step + max_comms_delay_steps + cfg.id_timeout
 
-        # --- IDENTIFY: collect STATUS into each agent's belief.
-        for aid in active_ids:
-            for m in inbox.get(aid, []):
-                if m.kind == "STATUS":
-                    src, st = m.payload
-                    controllers[aid]._heard = getattr(controllers[aid], "_heard", {})
-                    controllers[aid]._heard[src] = st
+            # --- IDENTIFY: collect STATUS into each agent's belief.
+            for aid in active_ids:
+                for m in inbox.get(aid, []):
+                    if m.kind == "STATUS":
+                        src, st = m.payload
+                        controllers[aid]._heard = getattr(controllers[aid], "_heard", {})
+                        controllers[aid]._heard[src] = st
 
-        # --- IDENTIFY complete: reconcile fault set, replan over the reduced swarm.
-        if (identify_deadline is not None and step >= identify_deadline
-                and all(c.mode == IDENTIFY for c in active_controllers)):
-            faulted = _reconcile_faults(controllers, active_ids, graph)
-            survivors = [a for a in active_ids if a not in faulted]
-            log["removed_agents"].append((step, t, sorted(faulted)))
-            _log(f"IDENTIFY consensus: faulted={sorted(faulted)}, survivors={survivors}")
+            # --- IDENTIFY complete: reconcile fault set, replan over the reduced swarm.
+            if (identify_deadline is not None and step >= identify_deadline
+                    and all(c.mode == IDENTIFY for c in active_controllers)):
+                faulted = _reconcile_faults(controllers, active_ids, graph)
+                survivors = [a for a in active_ids if a not in faulted]
+                log["removed_agents"].append((step, t, sorted(faulted)))
+                _log(f"IDENTIFY consensus: faulted={sorted(faulted)}, survivors={survivors}")
 
-            cycles += 1
-            log["recovery_cycles"] = cycles
-            remaining = bc.tf - t
-            if cycles > cfg.max_recovery_cycles or len(survivors) == 0 :
-                for a in active_ids:
+                cycles += 1
+                log["recovery_cycles"] = cycles
+                remaining = bc.tf - t
+                if cycles > cfg.max_recovery_cycles or len(survivors) == 0 :
+                    for a in active_ids:
+                        controllers[a].mode = FAILED
+                    status = "failed"
+                    _log(f"RECOVERY EXHAUSTED (cycles={cycles}, survivors={len(survivors)}, "
+                         f"remaining={remaining:.2f})")
+                    break
+
+                for a in faulted:
                     controllers[a].mode = FAILED
-                status = "failed"
-                _log(f"RECOVERY EXHAUSTED (cycles={cycles}, survivors={len(survivors)}, "
-                     f"remaining={remaining:.2f})")
-                break
 
-            for a in faulted:
-                controllers[a].mode = FAILED
+                # Continue the mission after fault recovery by replan using only the surviving agents. 
+                # The current payload state becomes the new initial condition, but the final goal is the same.
+                # The mission duration is extended by the same final time tf and time step N.
+                replan_start_t = t
+                replan_state = sim.state_vector()
+                rs_reduced = [sys_params.rs[j] for j in survivors]
+                sys_reduced = dataclasses.replace(sys_params, rs=rs_reduced, N=sys_params.N)
+                bc_replan = BoundaryConditions(x0=replan_state, xf=bc.xf, tf=bc.tf)
+                max_steps += sys_params.N
+                _log(f"REPLAN: survivors={survivors}, N'={sys_params.N}, at mission time={t:.2f}s")
+                plan = solve_decentralized_mppi(
+                    sys_reduced, bc_replan, epsilon,
+                    n_iter=cfg.mppi_iterations, n_samples=cfg.mppi_samples,
+                    sigma=cfg.mppi_sigma, lambda_=cfg.mppi_lambda, base_seed=cfg.mppi_base_seed,
+                    graph_degree=cfg.graph_degree
+                )
+                active_ids = survivors
+                _distribute_plan(plan, controllers, active_ids)
 
-            # Continue the mission after fault recovery by replan using only the surviving agents. 
-            # The current payload state becomes the new initial condition, but the final goal is the same.
-            # The mission duration is extended by the same final time tf and time step N.
-            replan_start_t = t
-            replan_state = sim.state_vector()
-            rs_reduced = [sys_params.rs[j] for j in survivors]
-            sys_reduced = dataclasses.replace(sys_params, rs=rs_reduced, N=sys_params.N)
-            bc_replan = BoundaryConditions(x0=replan_state, xf=bc.xf, tf=bc.tf)
-            max_steps += sys_params.N
-            _log(f"REPLAN: survivors={survivors}, N'={sys_params.N}, at mission time={t:.2f}s")
-            plan = solve_decentralized_mppi(
-                sys_reduced, bc_replan, epsilon,
-                n_iter=cfg.mppi_iterations, n_samples=cfg.mppi_samples,
-                sigma=cfg.mppi_sigma, lambda_=cfg.mppi_lambda, base_seed=cfg.mppi_base_seed,
-                graph_degree=cfg.graph_degree
-            )
-            active_ids = survivors
-            _distribute_plan(plan, controllers, active_ids)
-
-            # Rebuild comms over the surviving subgraph and reset the identify cycle.
-            graph = _build_line_of_sight_graph_with_degree(np.asarray(rs_reduced), 100.0, cfg.graph_degree)
-            graph = _relabel_graph(graph, survivors)
-            bus = CommsBus(graph, cfg.agents_comms_delay_step_map)
-            identify_deadline = None
-            for a in active_ids:
-                controllers[a]._heard = {}
-            continue  # restart loop on the fresh plan without stepping this iteration
+                # Rebuild comms over the surviving subgraph and reset the identify cycle.
+                graph = _build_line_of_sight_graph_with_degree(np.asarray(rs_reduced), 100.0, cfg.graph_degree)
+                graph = _relabel_graph(graph, survivors)
+                bus = CommsBus(graph, cfg.agents_comms_delay_step_map)
+                identify_deadline = None
+                for a in active_ids:
+                    controllers[a]._heard = {}
+                continue  # restart loop on the fresh plan without stepping this iteration
 
         # --- commands + dynamics step ---
         thrusts = [np.zeros(3) for _ in range(num_agents)]

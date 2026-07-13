@@ -152,7 +152,7 @@ def solve_decentralized_mppi(
     )[0]
     winner_tau_proj = np.asarray(winner_tau_proj, dtype=float).reshape(sys_params.N, 3)
     traj, ctrl, q, cost = new_opts.opt_given_tau_ipopt_new(
-        winner_tau_proj, sys_params.N, epsilon, sys_params, bc, num_iter=1000 #changed to 1000
+        winner_tau_proj, sys_params.N, epsilon, sys_params, bc, num_iter=3000 #last num_iter can be larger 
     )
     runtime = time.perf_counter() - start
 

@@ -123,7 +123,7 @@ def many_agent_scenario_gen(numagents):
     # rand_bc = BoundaryConditions(~)
     return rand_sys,rand_bc, 1e-5
 
-def random_scenario_generator():
+def random_scenario_generator(fixed_agents_num: int=-1):
     """
     Params:
     - a : semi-major axis - 1.1 - 1.3
@@ -181,7 +181,11 @@ def random_scenario_generator():
     tf = random.uniform(300, 900)
 
     # Number of agents and their positions (within 10m radius sphere)
-    n_agents = random.randint(3, 30) 
+    if fixed_agents_num <= 0:
+        n_agents = random.randint(3, 30) 
+    else :
+        n_agents = fixed_agents_num
+
     rs = []
     for _ in range(n_agents):
         mag = random.uniform(5, 50) 
@@ -189,8 +193,8 @@ def random_scenario_generator():
         direction /= np.linalg.norm(direction)
         rs.append(direction * mag)
 
-        # Number of timesteps — scale loosely with tf so discretisation stays reasonable
-    N = max(20, int(tf / 2))
+    # Number of timesteps — scale loosely with tf so discretisation stays reasonable
+    N = max(20, int(tf / 5))
 
     epsilon = random.uniform(1e-6, 1e-4)
 
