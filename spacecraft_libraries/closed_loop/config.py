@@ -15,9 +15,10 @@ class RecoveryConfig:
     # calibrated for the comparison.py-class scenarios (m~100, dt~2); a different
     # payload needs a re-tune. Stability heuristic: k_v ~ m/dt for fast velocity
     # damping. Angular damping is inherently slower (high Izz, cone-limited torque).
-    k_v: float = 30.0       # velocity-damping gain (force per m/s)
-    k_w: float = 20.0       # angular-rate-damping gain
-    u_max: float = 10.0     # per-agent thrust magnitude cap
+    k_v: float = 0.02        # velocity-damping gain (force per m/s)
+    k_w: float = 0.02        # angular-rate-damping gain
+    u_max: float = 1.        # per-agent thrust magnitude cap
+    dt_detumble_fac: float = 0.05 # during detumbling, dt can be smaller. so dt_detumble = dt * dt_detumble_fac
 
     # --- deviation detection ---
     dev_tol: float = 0.3    # weighted deviation threshold (see controller.deviation)
@@ -31,7 +32,7 @@ class RecoveryConfig:
     rest_v_tol: float = 1e-2
     rest_w_tol: float = 1e-2
     rest_hold: int = 2
-    max_detumble_steps: int = 30    # safety cap so a bad-gain run can't hang
+    max_detumble_steps: int = 400   # safety cap so a bad-gain run can't hang
 
     # --- comms / fault identification ---
     agents_comms_delay_step_map: dict[int, int] = field(default_factory=dict)
@@ -45,6 +46,6 @@ class RecoveryConfig:
     # --- MPPI replanning knobs (forwarded to solve_decentralized_mppi) ---
     mppi_iterations: int = 10
     mppi_samples: int = 5
-    mppi_sigma: float = 1e-1
+    mppi_sigma: float = 7e-1
     mppi_lambda: float = 1.0
     mppi_base_seed: int = 42

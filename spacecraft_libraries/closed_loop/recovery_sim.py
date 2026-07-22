@@ -108,7 +108,7 @@ def run_recovery_episode(
         state_history.append(np.asarray(sensed.as_array(), dtype=float).reshape(-1))
         active_controllers = [controllers[a] for a in active_ids]
 
-        if len(fault_events) > 0 :
+        if len(fault_events) > 0 and cycles < cfg.max_recovery_cycles:
             # --- DEVIATION message propagation: receiving it pulls a tracker into detumble.
             for aid in active_ids:
                 c = controllers[aid]
@@ -174,6 +174,13 @@ def run_recovery_episode(
                 bc_replan = BoundaryConditions(x0=replan_state, xf=bc.xf, tf=bc.tf)
                 max_steps += sys_params.N
                 _log(f"REPLAN: survivors={survivors}, N'={sys_params.N}, at mission time={t:.2f}s")
+                _log(
+                        "State before MPPI replan:\n"
+                        f"  r     = {replan_state.r} "
+                        f"  v     = {replan_state.v} "
+                        f"  phi   = {replan_state.phi} "
+                        f"  omega = {replan_state.omega}"
+                    )
                 plan = solve_decentralized_mppi(
                     sys_reduced, bc_replan, epsilon,
                     n_iter=cfg.mppi_iterations, n_samples=cfg.mppi_samples,
@@ -193,21 +200,31 @@ def run_recovery_episode(
                 continue  # restart loop on the fresh plan without stepping this iteration
 
         # --- commands + dynamics step ---
+        is_recovering = any( controllers[aid].mode in (DETUMBLE, IDENTIFY) for aid in active_ids )
         thrusts = [np.zeros(3) for _ in range(num_agents)]
         for aid in active_ids:
             thrusts[aid] = controllers[aid].command(sensed)
         active_mask = fault_model.actuation_mask()
         for aid in active_ids:
             if active_mask[aid]:
-                fuel += float(np.dot(thrusts[aid], thrusts[aid]))
-        # the replan assumes t = 0, so the advance of the simulation must also behave as if t = 0
-        sim.step(thrusts, active_mask, t - replan_start_t)
+                if is_recovering:  
+                    fuel += float(np.dot(thrusts[aid], thrusts[aid])) * cfg.dt_detumble_fac
+                else:
+                    fuel += float(np.dot(thrusts[aid], thrusts[aid]))
+
+        # The replan assumes t = 0, so the advance of the simulation must also behave as if t = 0
+        # And during recovery process, we used a smaller dt to avoid extremely large omega after euler integration
+        if is_recovering:
+            sim.step(thrusts, active_mask, t - replan_start_t, dt_overide = cfg.dt_detumble_fac * dt)
+            t += cfg.dt_detumble_fac * dt
+        else:
+            sim.step(thrusts, active_mask, t - replan_start_t)
+            t += dt
         for aid in active_ids:
             if controllers[aid].mode == TRACKING:
                 controllers[aid].advance_tracking()
 
         step += 1
-        t += dt
 
         if active_ids and all(controllers[a].mode == DONE for a in active_ids):
             status = "done"

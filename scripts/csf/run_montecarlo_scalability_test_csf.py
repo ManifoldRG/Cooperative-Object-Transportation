@@ -43,6 +43,9 @@ def parse_args():
                    help="Repeatable. Format 'agent_id:trigger_time:fault_type', "
                         "fault_type in {actuation,comms,both}.")
     p.add_argument("--no-fault", action="store_true", help="Run the healthy baseline.")
+    p.add_argument("--at-least-n-survivors", type=int, default=4)
+    p.add_argument("--fault-model", type=str, choices=("random", "localized"), help="fault_model in {random,localized}", default="random")
+    p.add_argument("--fault-type", type=str, choices=("actuation", "comms", "both"), help="fault_type in {actuation,comms,both}", default="actuation")
     p.add_argument("--mppi-iterations", type=int, default=20)
     p.add_argument("--mppi-samples", type=int, default=10)
     p.add_argument("--mppi-sigma", type=float, default=0.8)
@@ -51,7 +54,7 @@ def parse_args():
     p.add_argument("--max-recovery-cycles", type=int, default=5)
     p.add_argument("--graph-degree", type=int, default=3)
     p.add_argument("--quiet", action="store_false")
-    p.add_argument("--fixed-agents-num", type=int, default=-1)
+    p.add_argument("--fixed-agents-num", type=int, default=4)
     p.add_argument("--task-id",    type=int,  required=True)
     p.add_argument("--output-dir", type=Path, default=Path("results/tasks"))
     
@@ -169,7 +172,16 @@ def main():
     # get all fault events from random generator
     num_of_events = 1
     all_scenarios = [ random_scenario_generator(args.fixed_agents_num) for i in range(num_of_events)]
-    all_fault_events = [ [] for i in range(num_of_events)]
+    if args.no_fault:
+        all_fault_events = [ [] for i in range(num_of_events)]
+    else:
+        all_fault_events = [random_dropout_fault_generator( sys_params,
+                                                          bc.tf,
+                                                          num_of_events,
+                                                          args.fault_model,
+                                                          args.fault_type,
+                                                          at_least_n_survivors=args.at_least_n_survivors,
+                                                          affected_radius=1.0)[0] for (sys_params,bc,_) in all_scenarios]    
     all_commdelay_maps = [comms_delay_generator(sys_params, "fixed", args.comms_delay_steps, args.random_extra_comms_delay_steps) for (sys_params,_,_) in all_scenarios]
 
     # print out scenarios, faults and communicaiton maps before running

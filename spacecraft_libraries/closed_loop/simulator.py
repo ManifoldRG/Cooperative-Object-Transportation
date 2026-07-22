@@ -55,7 +55,7 @@ class PayloadSimulator:
             omega=self.omega.copy(),
         )
 
-    def step(self, agent_thrusts, active_mask, t: float | None = None) -> StateVectorLie:
+    def step(self, agent_thrusts, active_mask, t: float | None = None, dt_overide: float | None = None) -> StateVectorLie:
         """Advance one dt under the given per-agent body-frame thrusts.
 
         agent_thrusts: list/array of (3,) body-frame thrusts, one per agent
@@ -65,6 +65,11 @@ class PayloadSimulator:
         """
         if t is None:
             t = self.t
+
+        if dt_overide is None:
+            dt = self.dt 
+        else:
+            dt = dt_overide
 
         thrust_body = np.zeros(3)
         tau_body = np.zeros(3)
@@ -77,8 +82,8 @@ class PayloadSimulator:
 
         # Rotational update (body frame, Euler equation + Rodrigues kinematics).
         omega_dot = self.I_inv @ (tau_body - np.cross(self.omega, self.I @ self.omega))
-        omega_next = self.omega + self.dt * omega_dot
-        R_next = self.R @ so3_exp(self.dt * self.omega)
+        omega_next = self.omega + dt * omega_dot
+        R_next = self.R @ so3_exp(dt * self.omega)
 
         # Translational update (Tschauner-Hempel, body->inertial thrust via R).
         Psi = th_psi_matrix(self.sys_params.mu, self.sys_params.a, self.sys_params.e, t)
@@ -86,9 +91,9 @@ class PayloadSimulator:
         # Thrust uses the pre-update rotation R_k, matching new_opts.py:640-645
         # (R_k = ca.DM(Rs[k]); v_next uses R_k @ thrust_body).
         rv = np.hstack([self.r, self.v])
-        r_next = self.r + self.dt * self.v
-        v_next = self.v + self.dt * (Psi_vel @ rv + (1.0 / self.m) * (self.R @ thrust_body))
+        r_next = self.r + dt * self.v
+        v_next = self.v + dt * (Psi_vel @ rv + (1.0 / self.m) * (self.R @ thrust_body))
 
         self.r, self.v, self.R, self.omega = r_next, v_next, R_next, omega_next
-        self.t = t + self.dt
+        self.t = t + dt
         return self.state_vector()
