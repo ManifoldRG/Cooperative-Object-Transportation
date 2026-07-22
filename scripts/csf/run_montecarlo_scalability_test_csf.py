@@ -24,6 +24,7 @@ from spacecraft_libraries.evaluation.comparison import random_scenario_generator
 from spacecraft_libraries.solvers.decentralized_mppi import _build_line_of_sight_graph
 from spacecraft_libraries.closed_loop import RecoveryConfig, run_recovery_episode
 from spacecraft_libraries.closed_loop.faults import FaultEvent
+from spacecraft_libraries.data_structures import BoundaryConditions
 from spacecraft_libraries.evaluation import get_scenario, random_dropout_fault_generator
 
 
@@ -77,6 +78,11 @@ def format_fault_event_result(fault_events: list[FaultEvent], result: dict) -> s
     )
 
 def format_scenario(sys_params, bc, epsilon):
+    """Serialize scenario parameters, accepting both lists and NumPy arrays."""
+
+    def to_list(value):
+        return np.asarray(value, dtype=float).tolist()
+
     return (
         f"N={sys_params.N};"
         f"n_agents={len(sys_params.rs)};"
@@ -85,12 +91,61 @@ def format_scenario(sys_params, bc, epsilon):
         f"m={sys_params.m};"
         f"tf={bc.tf};"
         f"epsilon={epsilon};"
-        f"I={json.dumps(sys_params.I.tolist())};"
-        f"rs={json.dumps([r.tolist() for r in sys_params.rs])};"
-        f"xf_r={json.dumps(bc.xf.r.tolist())};"
-        f"xf_phi={json.dumps(bc.xf.phi.tolist())}"
+        f"I={json.dumps(to_list(sys_params.I))};"
+        f"rs={json.dumps(to_list(sys_params.rs))};"
+        f"xf_r={json.dumps(to_list(bc.xf.r))};"
+        f"xf_phi={json.dumps(to_list(bc.xf.phi))}"
     )
 
+def to_printable(obj):
+    """Convert dataclasses / numpy arrays / custom objects into readable dicts."""
+    if is_dataclass(obj):
+        return to_printable(asdict(obj))
+
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+
+    if isinstance(obj, (list, tuple)):
+        return [to_printable(x) for x in obj]
+
+    if isinstance(obj, dict):
+        return {k: to_printable(v) for k, v in obj.items()}
+
+    # For custom classes like FaultEvent if they are not dataclasses
+    if hasattr(obj, "__dict__"):
+        return {
+            k: to_printable(v)
+            for k, v in vars(obj).items()
+            if not k.startswith("_")
+        }
+
+    return obj
+
+def print_all_scenarios_faults_commsmap(all_scenarios: list[tuple[SystemParams, BoundaryConditions, float]], 
+                                        all_fault_events: list[list[list[FaultEvent]]],
+                                        all_commdelay_maps: list[dict[int,int]]):
+    for run_id, ((sys_params, bc, epsilon), fevent, commdelay_map) in enumerate(
+        zip(all_scenarios, all_fault_events, all_commdelay_maps),
+        start=0,
+    ):
+        print("\n" + "=" * 90)
+        print(f"[run {run_id}] FULL SCENARIO")
+        print("=" * 90)
+        print("\n[sys_params]")
+        pprint(to_printable(sys_params), width=140, sort_dicts=False)
+        print("\n[boundary_conditions]")
+        pprint(to_printable(bc), width=140, sort_dicts=False)
+        print("\n[epsilon]")
+        pprint(to_printable(epsilon), width=140, sort_dicts=False)
+        print(
+            f"[faults] "
+            f"{[(f.agent_id, f.trigger_time, f.fault_type) for f in fevent] or 'none'}"
+        )
+        print(
+            f"[delay] "
+            f"{[(aid, delay) for aid, delay in commdelay_map.items()]}"
+        )
+        print()
 def main():
 
     # for writing
@@ -116,6 +171,9 @@ def main():
     all_scenarios = [ random_scenario_generator(args.fixed_agents_num) for i in range(num_of_events)]
     all_fault_events = [ [] for i in range(num_of_events)]
     all_commdelay_maps = [comms_delay_generator(sys_params, "fixed", args.comms_delay_steps, args.random_extra_comms_delay_steps) for (sys_params,_,_) in all_scenarios]
+
+    # print out scenarios, faults and communicaiton maps before running
+    print_all_scenarios_faults_commsmap(all_scenarios, all_fault_events, all_commdelay_maps)
 
     # start writing file
     out = args.output_dir / f"task_{args.task_id:04d}_Nagents_{args.fixed_agents_num}.csv"
