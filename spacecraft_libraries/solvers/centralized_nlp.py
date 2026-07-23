@@ -7,6 +7,15 @@ import numpy as np
 from .. import og_opts
 from ..data_structures import BoundaryConditions, SystemParams
 
+#changed: added stall detection — solver can be cut off by the per-iteration
+#timeout callback before ever updating U from its zero initial guess, which
+#otherwise silently reports as a legitimate cost=0 result
+_STALL_THRESHOLD = 1e-9
+
+
+def _stalled(U: np.ndarray) -> bool:
+    return float(np.max(np.abs(U))) < _STALL_THRESHOLD
+
 
 def solve_centralized_nlp(
     sys_params: SystemParams,
@@ -31,6 +40,7 @@ def solve_centralized_nlp(
         max_runtime_s=max_runtime_s,
     )
     runtime = time.perf_counter() - start
+    cost = float("nan") if _stalled(U) else float(np.sum(np.square(U)))  #changed: flag stalled solve
     return {
         "method": "centralized_nlp",
         "control": U,
