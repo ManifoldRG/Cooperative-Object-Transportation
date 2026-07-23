@@ -8,8 +8,16 @@ Monte Carlo baseline comparison across 5 solvers:
     centralized_mppi
     decentralized_mppi
 
-decentralized_island_ga is excluded. Each run draws a fresh random scenario
-(agent count capped at 6) and writes results incrementally to CSV.
+Self-contained: does NOT modify or depend on run_method_comparison() in
+spacecraft_libraries.evaluation.comparison, so it can't affect other
+collaborators using that shared module. The only shared-library addition is
+solve_centralized_nlp_warm in solvers/centralized_nlp.py, which is purely
+additive (new function, nothing else touched).
+
+Each run draws a fresh random scenario via random_scenario_generator(),
+called directly with a randomly chosen agent count in [3, 6] — the agent cap
+is applied here, not in the shared generator, so its default range (3-30)
+is unaffected for everyone else.
 
 Usage
 -----
@@ -29,9 +37,17 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from spacecraft_libraries.evaluation import get_scenario, run_method_comparison
+from spacecraft_libraries.evaluation.comparison import random_scenario_generator
+from spacecraft_libraries.evaluation.metrics import lie_attitude_violation, terminal_violation
+from spacecraft_libraries.solvers.centralized_nlp import solve_centralized_nlp, solve_centralized_nlp_warm
+from spacecraft_libraries.solvers.centralized_ga import solve_centralized_ga
+from spacecraft_libraries.solvers.centralized_mppi import solve_centralized_mppi
+from spacecraft_libraries.solvers.decentralized_mppi import solve_decentralized_mppi
+
+MIN_AGENTS = 3
+MAX_AGENTS = 6
 
 
 def parse_args() -> argparse.Namespace:
@@ -48,13 +64,91 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mppi-samples",    type=int,   default=10)
     parser.add_argument("--mppi-sigma",      type=float, default=0.7)
     parser.add_argument("--mppi-lambda",     type=float, default=1.0)
-    parser.add_argument("--mppi-base-seed",  type=int,   default=42)
+    parser.add_argument("--mppi-seed",       type=int,   default=42)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
     parser.add_argument(
         "--output", type=Path,
         default=Path(f"data/baseline_comparison/baseline_{timestamp}.csv"),
     )
     return parser.parse_args()
+
+
+def _extract_terminal_state(result: dict, method: str) -> dict:
+    """Local copy — NLP solvers return a flat (N+1,12) state array, everything
+    else returns a trajectory of StateVectorLie objects."""
+    if method in ("centralized_nlp", "centralized_nlp_warm"):
+        x = result["state"]
+        return {"r": x[-1, 0:3], "v": x[-1, 3:6], "phi": x[-1, 6:9], "omega": x[-1, 9:12]}
+    traj = result["trajectory"]
+    s = traj.states[-1]
+    return {"r": s.r, "v": s.v, "phi": s.phi, "omega": s.omega}
+
+
+def run_baseline_solvers(sys_params, bc, epsilon, max_runtime_s: float,
+                          mppi_iterations: int, mppi_samples: int,
+                          mppi_sigma: float, mppi_lambda: float, mppi_seed: int) -> list[dict]:
+    """Runs exactly the 5 baseline solvers on one scenario. Independent of
+    run_method_comparison — decentralized_island_ga and centralized_nlp's
+    include_mppi toggle don't apply here, this function's solver set is fixed."""
+    solver_calls = [
+        ("centralized_nlp", lambda: solve_centralized_nlp(
+            sys_params, bc, max_iters=3000, max_runtime_s=max_runtime_s)),
+        ("centralized_nlp_warm", lambda: solve_centralized_nlp_warm(
+            sys_params, bc, max_iters=3000, max_runtime_s=max_runtime_s)),
+        ("centralized_ga", lambda: solve_centralized_ga(
+            sys_params, bc, epsilon, pop_size=10, generations=5000, max_runtime_s=max_runtime_s)),
+        ("centralized_mppi", lambda: solve_centralized_mppi(
+            sys_params, bc, epsilon,
+            n_iter=mppi_iterations, n_samples=mppi_samples,
+            sigma=mppi_sigma, lambda_=mppi_lambda, seed=mppi_seed,
+            max_runtime_s=max_runtime_s)),
+        ("decentralized_mppi", lambda: solve_decentralized_mppi(
+            sys_params, bc, epsilon,
+            n_iter=mppi_iterations, n_samples=mppi_samples,
+            sigma=mppi_sigma, lambda_=mppi_lambda, base_seed=mppi_seed,
+            max_runtime_s=max_runtime_s)),
+    ]
+
+    results = []
+    for method_name, solver in solver_calls:
+        try:
+            results.append(solver())
+        except Exception as exc:
+            print(f"  [{method_name}] failed — {exc}")
+            traceback.print_exc()
+            results.append({
+                "method": method_name,
+                "cost": float("nan"),
+                "runtime": float("nan"),
+                "state": None,
+                "trajectory": None,
+            })
+
+    table = []
+    for result in results:
+        cost = result.get("cost")
+        if cost is None or (isinstance(cost, float) and np.isnan(cost)):
+            table.append({
+                "method": result["method"],
+                "cost": float("nan"),
+                "terminal_violation": float("nan"),
+                "runtime_s": float("nan"),
+            })
+            continue
+        terminal = _extract_terminal_state(result, result["method"])
+        violation = (
+            terminal_violation(terminal["r"], bc.xf.r)
+            + terminal_violation(terminal["v"], bc.xf.v)
+            + lie_attitude_violation(terminal["phi"], bc.xf.phi)
+            + terminal_violation(terminal["omega"], bc.xf.omega)
+        )
+        table.append({
+            "method": result["method"],
+            "cost": float(result["cost"]),
+            "terminal_violation": float(violation),
+            "runtime_s": float(result["runtime"]),
+        })
+    return table
 
 
 def print_rows(run_id: int, rows: list[dict]) -> None:
@@ -93,7 +187,10 @@ def main() -> None:
         for run_id in range(1, args.runs + 1):
             print(f"\n--- Baseline run {run_id}/{args.runs} ---")
             try:
-                sys_params, bc, epsilon = get_scenario(5)  # random_scenario_generator, agent cap 6
+                # agent cap applied here, at the call site — the shared
+                # random_scenario_generator's own default range (3-30) is untouched
+                n_agents = random.randint(MIN_AGENTS, MAX_AGENTS)
+                sys_params, bc, epsilon = random_scenario_generator(fixed_agents_num=n_agents)
 
                 meta = {
                     "n_agents":    len(sys_params.rs),
@@ -109,19 +206,14 @@ def main() -> None:
                     f"agents={meta['n_agents']}  eps={meta['epsilon_tol']:.2e}"
                 )
 
-                rows = run_method_comparison(
+                rows = run_baseline_solvers(
                     sys_params, bc, epsilon,
                     max_runtime_s=args.time_limit,
-                    show_progress=True,
-                    silence_solver_output=True,
-                    include_mppi=True,
-                    include_warm_nlp=True,
-                    include_decentralized_ga=False,
                     mppi_iterations=args.mppi_iterations,
                     mppi_samples=args.mppi_samples,
                     mppi_sigma=args.mppi_sigma,
                     mppi_lambda=args.mppi_lambda,
-                    mppi_base_seed=args.mppi_base_seed,
+                    mppi_seed=args.mppi_seed,
                 )
 
                 print_rows(run_id, rows)
