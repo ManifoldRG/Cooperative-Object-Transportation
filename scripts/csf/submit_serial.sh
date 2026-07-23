@@ -1,16 +1,15 @@
 #!/bin/bash --login
 # Partition: multicore:  2-168 CPUs per job; multicore_small : 2-31 CPUS; serial : 1 CPU per job
-#SBATCH -p multicore
+#SBATCH -p serial
 # Time limit: HH:MM:SS max: 7-0 (7 days).
-#SBATCH -t 6:00:00
+#SBATCH -t 1:00:00
 # CPU Cores
-#SBATCH -n 2
+#SBATCH -n 1
 # Memory: went with 8G just in case
-#SBATCH --mem=8G
+#SBATCH --mem=2G
 # Job name
 #SBATCH --job-name=mppi_sens_mc
 # Job array: -a 1-N    : run tasks numbered 1 to N (1-indexed)
-# note: only 10 tasks at a time are accepted for serial partition and 42 for multicore, but its queued, meaning the first 42 tasks are run and then the next 42 tasks are run. SLURm automatically does this so its ok to leave it beyond the task limit
 #SBATCH -a 1-162
 
 # Output files
