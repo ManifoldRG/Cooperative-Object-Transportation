@@ -194,9 +194,15 @@ def multiple_shooting_optimization_new(bc: BoundaryConditions, num_steps, dt_cas
     tau_lower_bound = -ca.inf * np.ones(num_steps * 3)  # Set torque lower bound to -100
     tau_upper_bound = ca.inf * np.ones(num_steps * 3)  # Set torque upper bound to 100
 
-    ## For state variables, we leave them unbounded
-    state_lower_bound = -ca.inf * np.ones((num_steps + 1) * 6)  # 6 state variables per step
-    state_upper_bound = ca.inf * np.ones((num_steps + 1) * 6)
+    # Keep phi and omega away from huge values
+    phi_bound = np.pi - 1e-3 # avoid exact pi
+    omega_bound = (np.pi - 1e-3) / float(dt_casadi)
+    one_state_lb = np.array([ -phi_bound, -phi_bound, -phi_bound,
+                              -omega_bound, -omega_bound, -omega_bound])
+    one_state_ub = np.array([ phi_bound, phi_bound, phi_bound,
+                              omega_bound, omega_bound, omega_bound])
+    state_lower_bound = np.tile(one_state_lb, num_steps + 1)
+    state_upper_bound = np.tile(one_state_ub, num_steps + 1)
 
     # Combine bounds for tau and state variables
     lbx = np.concatenate([tau_lower_bound, state_lower_bound])
@@ -235,7 +241,7 @@ def multiple_shooting_optimization_new(bc: BoundaryConditions, num_steps, dt_cas
 
     original_stdout = sys.stdout
     # Create solver instance
-    solver = ca.nlpsol('solver', 'ipopt', nlp, opts)
+    solver = ca.nlpsol('multi_shooting_new_solver', 'ipopt', nlp, opts)
 
     # Run the solver
 

@@ -111,7 +111,7 @@ def so3_log_casadi(R):
     Note: all trace-based SO(3) logs are numerically delicate near pi.
     """
     tr = R[0, 0] + R[1, 1] + R[2, 2]
-    cos_theta = ca.fmax(-1, ca.fmin(1, (tr - 1) / 2))
+    cos_theta = ca.fmax(-1 + 1e-9, ca.fmin(1 - 1e-9, (tr - 1) / 2))
     theta = ca.acos(cos_theta)
     S = R - R.T
     v = vee_casadi(S)
@@ -393,7 +393,7 @@ def tau_proj_nonlin_quat_new(tau_hist, N, epsilon, sys_params: SystemParams, bc:
     else:
         opts = {'ipopt': {'max_iter': num_iter, 'print_level': 0, 'sb': 'yes'}}
 
-    solver = ca.nlpsol('solver', 'ipopt', nlp, opts)
+    solver = ca.nlpsol('tau_proj_nonlin_quat_new', 'ipopt', nlp, opts)
 
     original_stdout = sys.stdout
 
@@ -534,7 +534,7 @@ def tau_proj_nonlin_so3_poly2_new(tau_hist, N, epsilon, sys_params: SystemParams
     else:
         opts = {'ipopt': {'max_iter': num_iter, 'print_level': 0, 'sb': 'yes'}}
 
-    solver = ca.nlpsol('solver', 'ipopt', nlp, opts)
+    solver = ca.nlpsol('tau_proj_nonlin_so3_poly2', 'ipopt', nlp, opts)
 
     original_stdout = sys.stdout
 

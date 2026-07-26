@@ -194,7 +194,7 @@ def random_scenario_generator(fixed_agents_num: int=-1):
         rs.append(direction * mag)
 
     # Number of timesteps — scale loosely with tf so discretisation stays reasonable
-    N = max(20, int(tf / 5))
+    N = 20
 
     epsilon = random.uniform(1e-6, 1e-4)
 
