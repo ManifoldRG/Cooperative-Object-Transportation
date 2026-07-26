@@ -375,13 +375,14 @@ def comms_delay_generator(sys_params: SystemParams,
 #        - num_seeds and affected_radius are only used by the clustered model.
 #        - trigger time is chosen randomly between [0.1 - 0.5] *tf
 def random_dropout_fault_generator(sys_params: SystemParams, 
-                                   tf: float, 
+                                   tf: float,
                                    num_of_events: int=10,
                                    fault_model: str="random",
                                    _fault_type: str="both",
                                    at_least_n_survivors: int=2,
                                    num_seeds: int=2,
-                                   affected_radius: float=3.0) -> list[list[FaultEvent]]:
+                                   affected_radius: float=3.0,  
+                                   trigger_time: float=0.5) -> list[list[FaultEvent]]:
     print(
         f"[Fault Generator] "
         f"model={fault_model}, "
@@ -398,7 +399,7 @@ def random_dropout_fault_generator(sys_params: SystemParams,
     num_agents = len(sys_params.rs)
     agent_ids = list(range(num_agents))
     rs = np.asarray(sys_params.rs)
-    all_fault_events = [[]]
+    all_fault_events = []
 
     # check selected fault_model
     if ( fault_model not in all_fault_model ):
@@ -456,7 +457,8 @@ def random_dropout_fault_generator(sys_params: SystemParams,
         # generate the FaultEvent based on the collected faulted_agents
         for agent_id in faulted_agents:
             # choose when failure happens
-            trigger_time = random.uniform(0.1* tf, 0.5 * tf)
+            if  trigger_time != 0 :
+                trigger_time = random.uniform(0.1* tf, trigger_time * tf)
 
             # choose fault_type
             if ( _fault_type in all_fault_type ):
