@@ -219,7 +219,11 @@ def vee_casadi(S):
 
 def so3_exp_casadi(phi):
     """SO(3) exponential map using Rodrigues' formula with small-angle handling."""
-    theta = ca.norm_2(phi)
+
+    # to avoid theta=0
+    theta2 = ca.dot(phi, phi)
+    theta = ca.sqrt(theta2 + 1e-16)
+
     Phi = hat_casadi(phi)
     I3 = ca.SX.eye(3)
 

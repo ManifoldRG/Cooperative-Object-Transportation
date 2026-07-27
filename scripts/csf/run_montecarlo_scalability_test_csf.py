@@ -1,9 +1,8 @@
 """CLI driver for the closed-loop fault-recovery simulation.
 
 Examples:
-  py scripts/run_recovery_sim.py --scenario 1 --fault 2:25.0:both
-  py scripts/run_recovery_sim.py --scenario 1 --no-fault
-  py scripts/run_recovery_sim.py --scenario 1 --fault 2:25:both --fault 0:40:comms
+py run_montecarlo_scalability_test_csf.py --task-id 1 --output-dir here_test --fixed-agents-num 25 --no-fault 
+py run_montecarlo_scalability_test_csf.py --task-id 2 --output-dir here_test --fixed-agents-num 25 --at-least-n-survivors 23 
 """
 from pathlib import Path
 import argparse
@@ -49,7 +48,7 @@ def parse_args():
     p.add_argument("--mppi-iterations", type=int, default=20)
     p.add_argument("--mppi-samples", type=int, default=10)
     p.add_argument("--mppi-sigma", type=float, default=0.8)
-    p.add_argument("--comms-delay-steps", type=int, default=2)
+    p.add_argument("--comms-delay-steps", type=int, default=100)
     p.add_argument("--random-extra-comms-delay-steps", type=int, default=0)
     p.add_argument("--max-recovery-cycles", type=int, default=5)
     p.add_argument("--graph-degree", type=int, default=3)
@@ -154,7 +153,7 @@ def main():
     # for writing
     fieldnames = [
         "run_id", "time_limit_s", "method",
-        "cost", "terminal_violation", "runtime_s",
+        "cost", "terminal_violation", "runtime_s", "simtime_s",
         "n_agents", "a", "e", "m", "tf", "epsilon_tol",
         "agent_commdelay", "faults", "scenario",
     ]
@@ -181,7 +180,8 @@ def main():
                                                           args.fault_model,
                                                           args.fault_type,
                                                           at_least_n_survivors=args.at_least_n_survivors,
-                                                          affected_radius=1.0)[0] for (sys_params,bc,_) in all_scenarios]    
+                                                          affected_radius=1.0,
+                                                          trigger_time=0 )[0] for (sys_params,bc,_) in all_scenarios]
     all_commdelay_maps = [comms_delay_generator(sys_params, "fixed", args.comms_delay_steps, args.random_extra_comms_delay_steps) for (sys_params,_,_) in all_scenarios]
 
     # print out scenarios, faults and communicaiton maps before running
@@ -210,6 +210,7 @@ def main():
                     "cost": result["fuel"],
                     "terminal_violation": result["terminal_violation"],
                     "runtime_s": wall,
+                    "simtime_s": result["sim_time"],
                     "n_agents": len(sys_params.rs),
                     "a": sys_params.a,
                     "e": sys_params.e,

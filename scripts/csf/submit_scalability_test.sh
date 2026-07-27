@@ -35,10 +35,19 @@ export PYTHONPATH=~/rev_mrgp/Cooperative-Object-Transportation:$PYTHONPATH
 # Change to scratch directory
 cd ~/scratch
 
-# Run the task basically running the code and reading the scenarios to be run from the mrgp folder, and writing output to scratch folder
-python ~/rev_mrgp/Cooperative-Object-Transportation/scripts/csf/run_montecarlo_scalability_test_csf.py \
+# open loop run example with 4 agents ( repeat with 11, 18, 25 agents)
+python  ~/rev_mrgp/Cooperative-Object-Transportation/scripts/csf/run_montecarlo_scalability_test_csf.py \
     --task-id ${SLURM_ARRAY_TASK_ID} \
-    --fixed-agents-num 3 \
-    --output-dir ~/scratch/results/tasks
+    --output-dir ~/scratch/results/tasks \
+    --fixed-agents-num 4 \
+    --no-fault
+
+# close loop run exmaple with (fixed_agents_num=4 , at_least_n_survivors=3) 
+# repeat with (agents=11, survivors=9), (18, 16) and (25, 22)
+python  ~/rev_mrgp/Cooperative-Object-Transportation/scripts/csf/run_montecarlo_scalability_test_csf.py \
+    --task-id ${SLURM_ARRAY_TASK_ID} \
+    --output-dir ~/scratch/results/tasks \
+    --fixed-agents-num 4 \
+    --at-least-n-survivors 3
 
 echo "Task ${SLURM_ARRAY_TASK_ID} finished: $(date)"
