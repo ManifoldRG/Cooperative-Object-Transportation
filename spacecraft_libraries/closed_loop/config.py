@@ -16,9 +16,9 @@ class RecoveryConfig:
     # payload needs a re-tune. Stability heuristic: k_v ~ m/dt for fast velocity
     # damping. Angular damping is inherently slower (high Izz, cone-limited torque).
     k_v: float = 0.05
-    k_w: float = 0.02
-    u_max: float = 0.5
-    dt_detumble_fac: float = 0.0002 # during detumbling, dt smaller. so dt_detumble = dt * dt_detumble_fac
+    k_w: float = 0.1 #changed from 0.02 to 0.1
+    u_max: float = 1 #0.5 to 1
+    dt_detumble_fac: float = 0.0001 # during detumbling, dt smaller. so dt_detumble = dt * dt_detumble_fac
 
     # --- deviation detection ---
     dev_tol: float = 0.1    # weighted deviation threshold (see controller.deviation)
@@ -32,7 +32,7 @@ class RecoveryConfig:
     rest_v_tol: float = 1e-2
     rest_w_tol: float = 1e-2
     rest_hold: int = 2
-    max_detumble_steps: int = 20000 # safety cap so a bad-gain run can't hang
+    max_detumble_steps: int = 80000 # safety cap so a bad-gain run can't hang
 
     # --- comms / fault identification ---
     agents_comms_delay_step_map: dict[int, int] = field(default_factory=dict)

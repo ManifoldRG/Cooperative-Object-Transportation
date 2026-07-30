@@ -154,7 +154,7 @@ def random_scenario_generator(fixed_agents_num: int = -1):
     - epsilon_b : Final attitude quaternion - any random quaternion
     - tf : final time : random time within 1 - 10 mins # change to larger (10-60 mins)
     - agent placement : random within 10m radius sphere
-    - number of agents  : 3 - 30, random value with max 30 min 3.
+    - number of agents  : 3 - 6, random value with max 6 min 3. [capped for baseline comparison tractability]
     """
 
     # Semi-major axis: 1.1–1.3 × Earth radius
@@ -164,16 +164,18 @@ def random_scenario_generator(fixed_agents_num: int = -1):
     # Eccentricity
     e = random.uniform(0.01, 0.3)
 
-    # Inertia tensor: random diagonal, each principal moment in (1, 5000)
-    diag_vals = np.array([random.uniform(1, 500) for _ in range(3)])
-    # Ensure valid inertia (triangle inequality: each < sum of other two)
-    diag_vals = np.sort(diag_vals)  # sort so triangle inequality is easier to satisfy
-    while diag_vals[2] >= diag_vals[0] + diag_vals[1]:
-        diag_vals = np.sort(np.array([random.uniform(1, 5000) for _ in range(3)]))
-    J = np.diag(diag_vals)
+    # # Inertia tensor: random diagonal, each principal moment in (1, 5000)
+    # diag_vals = np.array([random.uniform(1, 500) for _ in range(3)])
+    # # Ensure valid inertia (triangle inequality: each < sum of other two)
+    # diag_vals = np.sort(diag_vals)  # sort so triangle inequality is easier to satisfy
+    # while diag_vals[2] >= diag_vals[0] + diag_vals[1]:
+    #     diag_vals = np.sort(np.array([random.uniform(1, 5000) for _ in range(3)]))
+    #J = np.diag(diag_vals)
+    m = random.uniform(1, 500)
+    #J = sample_inertia_tensor(m)
 
     # Payload mass (kg)
-    m = random.uniform(1, 500)
+
 
     # Final position: random point within 1km radius sphere
     r_mag = random.uniform(0, 1000)  # metres
@@ -182,9 +184,8 @@ def random_scenario_generator(fixed_agents_num: int = -1):
     rb = r_dir * r_mag
 
     # Final attitude: random unit quaternion [x, y, z, w] via Gaussian sampling
-    #q_raw = np.random.randn(4)
+    # q_raw = np.random.randn(4)
     # epsilon_b = q_raw / np.linalg.norm(q_raw)
-
 
     # generating the quaternion first and then converting to twist
     q_raw = np.random.randn(4)
@@ -202,31 +203,35 @@ def random_scenario_generator(fixed_agents_num: int = -1):
 
     # Number of agents and their positions (within 10m radius sphere)
     if fixed_agents_num <= 0:
-        n_agents = random.randint(3, 30) 
-    else :
+        n_agents = random.randint(3, 6)  # changed: agent count cap reduced from 30 to 6 for baseline tractability
+    else:
         n_agents = fixed_agents_num
 
     rs = []
     for _ in range(n_agents):
-        mag = random.uniform(5, 50) 
+        mag = random.uniform(5, 50)
         direction = np.random.randn(3)
         direction /= np.linalg.norm(direction)
         rs.append(direction * mag)
 
+    L = max(np.linalg.norm(r) for r in rs)
+
+    # Inertia tensor
+    J = sample_inertia_tensor(m, L)
+
     # Number of timesteps — scale loosely with tf so discretisation stays reasonable
-    N = 20
+    N = max(20, int(tf / 5))
 
     epsilon = random.uniform(1e-6, 1e-4)
 
-    sys_params = SystemParams(mu=3.98e14, a=a,e=e, nu=np.pi / 2, I=J, m=m, rs=rs, N=N) #changes to pi/2
+    sys_params = SystemParams(mu=3.98e14, a=a, e=e, nu=np.pi / 2, I=J, m=m, rs=rs, N=N)  # changes to pi/2
 
-    bc = BoundaryConditions( x0=StateVectorLie(r=np.array([0, 0, 0]), v=np.array([0, 0, 0]),
-                                            phi=np.array([0, 0, 0]),omega=np.array([0, 0, 0]) ),
-         xf=StateVectorLie(r=rb, v=np.array([0, 0, 0]),
-                        phi=phi_b, omega=np.array([0, 0, 0]) ), tf=tf)
+    bc = BoundaryConditions(x0=StateVectorLie(r=np.array([0, 0, 0]), v=np.array([0, 0, 0]),
+                                              phi=np.array([0, 0, 0]), omega=np.array([0, 0, 0])),
+                            xf=StateVectorLie(r=rb, v=np.array([0, 0, 0]),
+                                              phi=phi_b, omega=np.array([0, 0, 0])), tf=tf)
 
     return sys_params, bc, epsilon
-
 
 
 def scenario_1() -> tuple[SystemParams, BoundaryConditions, float]:
