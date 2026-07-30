@@ -123,7 +123,27 @@ def many_agent_scenario_gen(numagents):
     # rand_bc = BoundaryConditions(~)
     return rand_sys,rand_bc, 1e-5
 
-def random_scenario_generator(fixed_agents_num: int=-1):
+def sample_inertia_tensor(m: float, L: float, max_tries: int = 10000) -> np.ndarray:
+    """
+    Generating physically valid inertia tensor for a body of mass m
+    that fits within a sphere of radius L (sampled per call).
+
+    Constraints enforced (all necessary for a real rigid body):
+    - 0 <= I_i <= m * L^2            (no mass element can sit beyond radius L)
+    - I_1 + I_2 + I_3 <= 2 * m * L^2  (sum bound from integrating over the body)
+    - triangle inequality: I_i < I_j + I_k for all permutations
+    """
+    I_max = m * L ** 2 # setting the max limit
+    for _ in range(max_tries):
+        vals = np.sort([random.uniform(0, I_max) for _ in range(3)]) #automatically ensuring first cond satisfied
+        if vals.sum() > 2 * I_max: # second conditions
+            continue
+        if vals[2] >= vals[0] + vals[1]: #third condition
+            continue
+        return np.diag(vals)
+    raise RuntimeError("sample_inertia_tensor: failed to find valid sample in max_tries")
+
+def random_scenario_generator(fixed_agents_num: int = -1):
     """
     Params:
     - a : semi-major axis - 1.1 - 1.3
