@@ -125,7 +125,8 @@ def to_printable(obj):
 
 def print_all_scenarios_faults_commsmap(all_scenarios: list[tuple[SystemParams, BoundaryConditions, float]], 
                                         all_fault_events: list[list[list[FaultEvent]]],
-                                        all_commdelay_maps: list[dict[int,int]]):
+                                        all_commdelay_maps: list[dict[int,int]],
+                                        cfg: RecoveryConfig ):
     for run_id, ((sys_params, bc, epsilon), fevent, commdelay_map) in enumerate(
         zip(all_scenarios, all_fault_events, all_commdelay_maps),
         start=0,
@@ -139,6 +140,8 @@ def print_all_scenarios_faults_commsmap(all_scenarios: list[tuple[SystemParams, 
         pprint(to_printable(bc), width=140, sort_dicts=False)
         print("\n[epsilon]")
         pprint(to_printable(epsilon), width=140, sort_dicts=False)
+        print("\n[recovery_config]")
+        pprint(to_printable(cfg), width=140, sort_dicts=False)
         print(
             f"[faults] "
             f"{[(f.agent_id, f.trigger_time, f.fault_type) for f in fevent] or 'none'}"
@@ -185,7 +188,7 @@ def main():
     all_commdelay_maps = [comms_delay_generator(sys_params, "fixed", args.comms_delay_steps, args.random_extra_comms_delay_steps) for (sys_params,_,_) in all_scenarios]
 
     # print out scenarios, faults and communicaiton maps before running
-    print_all_scenarios_faults_commsmap(all_scenarios, all_fault_events, all_commdelay_maps)
+    print_all_scenarios_faults_commsmap(all_scenarios, all_fault_events, all_commdelay_maps, cfg)
 
     # start writing file
     out = args.output_dir / f"task_{args.task_id:04d}_Nagents_{args.fixed_agents_num}.csv"
