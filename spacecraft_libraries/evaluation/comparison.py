@@ -38,7 +38,7 @@ def _render_loading_bar(completed: int, total: int) -> None:
     if completed == total:
         print()
 
-def many_agent_scenario_gen(numagents):
+def many_agent_scenario_gen(numagents, seed: int | None = None):
     rsfull = [np.array([1 / 2, 1, 3 / 2]),
               np.array([0, 1 / 2, 2]),
               np.array([-1 / 2, 1, -3 / 2]),
@@ -111,7 +111,7 @@ def many_agent_scenario_gen(numagents):
               np.array([0.59, -2.01, -2.47]),
               np.array([-1.02, 1.93, -2.46])
               ]
-    rand_rs = random.sample(rsfull, numagents)
+    rand_rs = random.sample(rsfull, numagents) #fixme seed needed
     rand_sys = SystemParams(mu=3.98e14, a=8e6, e=0.2, nu=np.pi/4, I=1000*np.diag([1,2,3]),m=100, rs=rand_rs, N=20)
     rand_bc = BoundaryConditions(x0=StateVectorLie(r=np.array([0, 0, 0]), v=np.array([0, 0, 0]), #changed: quaternion to Twist
         phi=np.array([0, 0, 0]),omega=np.array([0, 0, 0])),
@@ -123,7 +123,7 @@ def many_agent_scenario_gen(numagents):
     # rand_bc = BoundaryConditions(~)
     return rand_sys,rand_bc, 1e-5
 
-def sample_inertia_tensor(m: float, L: float, max_tries: int = 10000) -> np.ndarray:
+def sample_inertia_tensor(m: float, L: float, max_tries: int = 10000, rng: random.Random = None) -> np.ndarray:
     """
     Generating physically valid inertia tensor for a body of mass m
     that fits within a sphere of radius L (sampled per call).
@@ -135,7 +135,8 @@ def sample_inertia_tensor(m: float, L: float, max_tries: int = 10000) -> np.ndar
     """
     I_max = m * L ** 2 # setting the max limit
     for _ in range(max_tries):
-        vals = np.sort([random.uniform(0, I_max) for _ in range(3)]) #automatically ensuring first cond satisfied
+        _rng = rng if rng is not None else random
+        vals = np.sort([_rng.uniform(0, I_max) for _ in range(3)]) #automatically ensuring first cond satisfied
         if vals.sum() > 2 * I_max: # second conditions
             continue
         if vals[2] >= vals[0] + vals[1]: #third condition
@@ -143,7 +144,7 @@ def sample_inertia_tensor(m: float, L: float, max_tries: int = 10000) -> np.ndar
         return np.diag(vals)
     raise RuntimeError("sample_inertia_tensor: failed to find valid sample in max_tries")
 
-def random_scenario_generator(fixed_agents_num: int = -1):
+def random_scenario_generator(fixed_agents_num: int = -1, seed: int | None = None):
     """
     Params:
     - a : semi-major axis - 1.1 - 1.3
@@ -159,10 +160,10 @@ def random_scenario_generator(fixed_agents_num: int = -1):
 
     # Semi-major axis: 1.1–1.3 × Earth radius
     R_earth = 6.371e6
-    a = random.uniform(1.1, 1.3) * R_earth
+    a = random.uniform(1.1, 1.3) * R_earth #fixme seed needed
 
     # Eccentricity
-    e = random.uniform(0.01, 0.3)
+    e = random.uniform(0.01, 0.3) #fixme seed needed
 
     # # Inertia tensor: random diagonal, each principal moment in (1, 5000)
     # diag_vals = np.array([random.uniform(1, 500) for _ in range(3)])
@@ -171,15 +172,15 @@ def random_scenario_generator(fixed_agents_num: int = -1):
     # while diag_vals[2] >= diag_vals[0] + diag_vals[1]:
     #     diag_vals = np.sort(np.array([random.uniform(1, 5000) for _ in range(3)]))
     #J = np.diag(diag_vals)
-    m = random.uniform(1, 500)
+    m = random.uniform(1, 500) #fixme seed needed
     #J = sample_inertia_tensor(m)
 
     # Payload mass (kg)
 
 
     # Final position: random point within 1km radius sphere
-    r_mag = random.uniform(0, 1000)  # metres
-    r_dir = np.random.randn(3)
+    r_mag = random.uniform(0, 1000)  # metres #fixme seed needed
+    r_dir = np.random.randn(3) #fixme seed needed
     r_dir /= np.linalg.norm(r_dir)
     rb = r_dir * r_mag
 
@@ -188,7 +189,7 @@ def random_scenario_generator(fixed_agents_num: int = -1):
     # epsilon_b = q_raw / np.linalg.norm(q_raw)
 
     # generating the quaternion first and then converting to twist
-    q_raw = np.random.randn(4)
+    q_raw = np.random.randn(4) #fixme seed needed
     q_raw /= np.linalg.norm(q_raw)
     x, y, z, w = q_raw
     R = np.array([
@@ -199,18 +200,18 @@ def random_scenario_generator(fixed_agents_num: int = -1):
     phi_b = so3_log(R)
 
     # Final time: 1–10 minutes in seconds
-    tf = random.uniform(300, 900)
+    tf = random.uniform(300, 900) #fixme seed needed
 
     # Number of agents and their positions (within 10m radius sphere)
-    if fixed_agents_num <= 0:
+    if fixed_agents_num <= 0: #fixme seed needed
         n_agents = random.randint(3, 6)  # changed: agent count cap reduced from 30 to 6 for baseline tractability
     else:
         n_agents = fixed_agents_num
 
     rs = []
     for _ in range(n_agents):
-        mag = random.uniform(5, 50)
-        direction = np.random.randn(3)
+        mag = random.uniform(5, 50) #fixme seed needed
+        direction = np.random.randn(3) #fixme seed needed
         direction /= np.linalg.norm(direction)
         rs.append(direction * mag)
 
@@ -222,7 +223,7 @@ def random_scenario_generator(fixed_agents_num: int = -1):
     # Number of timesteps — scale loosely with tf so discretisation stays reasonable
     N = max(20, int(tf / 5))
 
-    epsilon = random.uniform(1e-6, 1e-4)
+    epsilon = random.uniform(1e-6, 1e-4) #fixme seed needed
 
     sys_params = SystemParams(mu=3.98e14, a=a, e=e, nu=np.pi / 2, I=J, m=m, rs=rs, N=N)  # changes to pi/2
 
@@ -312,7 +313,7 @@ def scaling_base_scenario() -> tuple[SystemParams, BoundaryConditions, float]:
     return sys_params, bc, epsilon
 
 
-def scaling_inject_agents(base_sys: SystemParams,base_bc: BoundaryConditions,epsilon: float,n_agents: int) -> tuple[SystemParams, BoundaryConditions, float]:
+def scaling_inject_agents(base_sys: SystemParams,base_bc: BoundaryConditions,epsilon: float,n_agents: int, seed: int | None = None) -> tuple[SystemParams, BoundaryConditions, float]:
     """
     Clone base_sys and populate rs with n_agents freshly randomised attachment
     vectors using the same placement rule as random_scenario_generator:
@@ -373,7 +374,6 @@ def comms_delay_generator(sys_params: SystemParams,
     for aid in range(num_agents):
         if ( mode=="random" ):
             agents_comms_delay_step_map[aid] = delay_time_step + random.randint(0,extra_time_step)
-        else:
             agents_comms_delay_step_map[aid] = delay_time_step
 
     return agents_comms_delay_step_map

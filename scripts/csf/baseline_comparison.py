@@ -1,81 +1,84 @@
+#!/usr/bin/env python3
 """
 baseline_comparison.py
 -----------------------
-Monte Carlo baseline comparison across 5 solvers:
-    centralized_nlp        (cold)
-    centralized_nlp_warm   (warm)
-    centralized_ga
-    centralized_mppi
-    decentralized_mppi
+Baseline comparison — one solver run per task, called by SLURM job array.
 
-Self-contained: does NOT modify or depend on run_method_comparison() in
-spacecraft_libraries.evaluation.comparison, so it can't affect other
-collaborators using that shared module. The only shared-library addition is
-solve_centralized_nlp_warm in solvers/centralized_nlp.py, which is purely
-additive (new function, nothing else touched).
-
-Each run draws a fresh random scenario via random_scenario_generator(),
-called directly with a randomly chosen agent count in [3, 6] — the agent cap
-is applied here, not in the shared generator, so its default range (3-30)
-is unaffected for everyone else.
-
-Usage
------
-    python baseline_comparison.py --runs 30 --time-limit 60
-    python baseline_comparison.py --runs 10 --time-limit 120 --seed 42
+Usage:
+    python baseline_comparison.py --task-id 1 \
+        --scenarios results/scenarios.json \
+        --output-dir results/tasks
 """
-
 from __future__ import annotations
 
 import argparse
 import csv
-import random
+import json
 import sys
 import traceback
-from datetime import datetime
+from itertools import product
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
-from spacecraft_libraries.evaluation.comparison import random_scenario_generator
+from spacecraft_libraries.data_structures import (
+    BoundaryConditions, SystemParams, StateVectorLie,
+)
 from spacecraft_libraries.evaluation.metrics import lie_attitude_violation, terminal_violation
 from spacecraft_libraries.solvers.centralized_nlp import solve_centralized_nlp, solve_centralized_nlp_warm
 from spacecraft_libraries.solvers.centralized_ga import solve_centralized_ga
 from spacecraft_libraries.solvers.centralized_mppi import solve_centralized_mppi
 from spacecraft_libraries.solvers.decentralized_mppi import solve_decentralized_mppi
 
-MIN_AGENTS = 3
-MAX_AGENTS = 6
+METHODS = [
+    "centralized_nlp",
+    "centralized_nlp_warm",
+    "centralized_ga",
+    "centralized_mppi",
+    "decentralized_mppi",
+]
+
+FIELDNAMES = [
+    "scenario_id", "method", "time_limit_s",
+    "cost", "terminal_violation", "runtime_s",
+    "n_agents", "a", "e", "m", "tf", "epsilon_tol",
+]
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Monte Carlo baseline comparison: cold/warm NLP, centralized GA, centralized/decentralized MPPI."
+def build_combos(scenarios):
+    combos = []
+    for sc, method in product(scenarios, METHODS):
+        combos.append(dict(scenario_id=sc["scenario_id"], scenario=sc, method=method))
+    return combos
+
+
+def load_scenarios(path):
+    with open(path) as f:
+        return json.load(f)
+
+
+def make_sys_bc(s):
+    sys_params = SystemParams(
+        mu=s["mu"], a=s["a"], e=s["e"], nu=s["nu"],
+        I=np.diag(s["I_diag"]), m=s["m"],
+        rs=[np.array(r) for r in s["rs"]], N=s["N"],
     )
-    parser.add_argument("--runs",       type=int,   default=10,
-                        help="Number of Monte Carlo runs. Default: 10")
-    parser.add_argument("--time-limit", type=float, default=60.0,
-                        help="Per-solver time limit in seconds. Default: 60")
-    parser.add_argument("--seed",       type=int,   default=None,
-                        help="Optional base RNG seed for reproducibility.")
-    parser.add_argument("--mppi-iterations", type=int,   default=20)
-    parser.add_argument("--mppi-samples",    type=int,   default=10)
-    parser.add_argument("--mppi-sigma",      type=float, default=0.7)
-    parser.add_argument("--mppi-lambda",     type=float, default=1.0)
-    parser.add_argument("--mppi-seed",       type=int,   default=42)
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    parser.add_argument(
-        "--output", type=Path,
-        default=Path(f"data/baseline_comparison/baseline_{timestamp}.csv"),
+    bc = BoundaryConditions(
+        x0=StateVectorLie(r=np.array(s["x0_r"]), v=np.array(s["x0_v"]),
+                          phi=np.array(s["x0_phi"]), omega=np.array(s["x0_omega"])),
+        xf=StateVectorLie(r=np.array(s["xf_r"]), v=np.array(s["xf_v"]),
+                          phi=np.array(s["xf_phi"]), omega=np.array(s["xf_omega"])),
+        tf=s["tf"],
     )
-    return parser.parse_args()
+    return sys_params, bc, s["epsilon"]
 
 
 def _extract_terminal_state(result: dict, method: str) -> dict:
-    """Local copy — NLP solvers return a flat (N+1,12) state array, everything
-    else returns a trajectory of StateVectorLie objects."""
+    """NLP solvers return a flat (N+1,12) state array, everything else
+    returns a trajectory of StateVectorLie objects."""
     if method in ("centralized_nlp", "centralized_nlp_warm"):
         x = result["state"]
         return {"r": x[-1, 0:3], "v": x[-1, 3:6], "phi": x[-1, 6:9], "omega": x[-1, 9:12]}
@@ -84,158 +87,125 @@ def _extract_terminal_state(result: dict, method: str) -> dict:
     return {"r": s.r, "v": s.v, "phi": s.phi, "omega": s.omega}
 
 
-def run_baseline_solvers(sys_params, bc, epsilon, max_runtime_s: float,
-                          mppi_iterations: int, mppi_samples: int,
-                          mppi_sigma: float, mppi_lambda: float, mppi_seed: int) -> list[dict]:
-    """Runs exactly the 5 baseline solvers on one scenario. Independent of
-    run_method_comparison — decentralized_island_ga and centralized_nlp's
-    include_mppi toggle don't apply here, this function's solver set is fixed."""
-    solver_calls = [
-        ("centralized_nlp", lambda: solve_centralized_nlp(
-            sys_params, bc, max_iters=3000, max_runtime_s=max_runtime_s)),
-        ("centralized_nlp_warm", lambda: solve_centralized_nlp_warm(
-            sys_params, bc, max_iters=3000, max_runtime_s=max_runtime_s)),
-        ("centralized_ga", lambda: solve_centralized_ga(
-            sys_params, bc, epsilon, pop_size=10, generations=5000, max_runtime_s=max_runtime_s)),
-        ("centralized_mppi", lambda: solve_centralized_mppi(
+def run_one_solver(method: str, sys_params, bc, epsilon, max_runtime_s: float,
+                    mppi_iterations: int, mppi_samples: int,
+                    mppi_sigma: float, mppi_lambda: float, mppi_seed: int) -> dict:
+    solvers = {
+        "centralized_nlp": lambda: solve_centralized_nlp(
+            sys_params, bc, max_iters=3000, max_runtime_s=max_runtime_s),
+        "centralized_nlp_warm": lambda: solve_centralized_nlp_warm(
+            sys_params, bc, max_iters=3000, max_runtime_s=max_runtime_s),
+        "centralized_ga": lambda: solve_centralized_ga(
+            sys_params, bc, epsilon, pop_size=10, generations=5000, max_runtime_s=max_runtime_s),
+        "centralized_mppi": lambda: solve_centralized_mppi(
             sys_params, bc, epsilon,
             n_iter=mppi_iterations, n_samples=mppi_samples,
             sigma=mppi_sigma, lambda_=mppi_lambda, seed=mppi_seed,
-            max_runtime_s=max_runtime_s)),
-        ("decentralized_mppi", lambda: solve_decentralized_mppi(
+            max_runtime_s=max_runtime_s),
+        "decentralized_mppi": lambda: solve_decentralized_mppi(
             sys_params, bc, epsilon,
             n_iter=mppi_iterations, n_samples=mppi_samples,
             sigma=mppi_sigma, lambda_=mppi_lambda, base_seed=mppi_seed,
-            max_runtime_s=max_runtime_s)),
-    ]
+            max_runtime_s=max_runtime_s),
+    }
 
-    results = []
-    for method_name, solver in solver_calls:
-        try:
-            results.append(solver())
-        except Exception as exc:
-            print(f"  [{method_name}] failed — {exc}")
-            traceback.print_exc()
-            results.append({
-                "method": method_name,
-                "cost": float("nan"),
-                "runtime": float("nan"),
-                "state": None,
-                "trajectory": None,
-            })
+    try:
+        result = solvers[method]()
+    except Exception as exc:
+        print(f"  [{method}] failed — {exc}")
+        traceback.print_exc()
+        return {"cost": float("nan"), "terminal_violation": float("nan"), "runtime_s": float("nan")}
 
-    table = []
-    for result in results:
-        cost = result.get("cost")
-        if cost is None or (isinstance(cost, float) and np.isnan(cost)):
-            table.append({
-                "method": result["method"],
-                "cost": float("nan"),
-                "terminal_violation": float("nan"),
-                "runtime_s": float("nan"),
-            })
-            continue
-        terminal = _extract_terminal_state(result, result["method"])
-        violation = (
-            terminal_violation(terminal["r"], bc.xf.r)
-            + terminal_violation(terminal["v"], bc.xf.v)
-            + lie_attitude_violation(terminal["phi"], bc.xf.phi)
-            + terminal_violation(terminal["omega"], bc.xf.omega)
-        )
-        table.append({
-            "method": result["method"],
-            "cost": float(result["cost"]),
-            "terminal_violation": float(violation),
-            "runtime_s": float(result["runtime"]),
-        })
-    return table
+    cost = result.get("cost")
+    if cost is None or (isinstance(cost, float) and np.isnan(cost)):
+        return {"cost": float("nan"), "terminal_violation": float("nan"), "runtime_s": float("nan")}
+
+    terminal = _extract_terminal_state(result, method)
+    violation = (
+        terminal_violation(terminal["r"], bc.xf.r)
+        + terminal_violation(terminal["v"], bc.xf.v)
+        + lie_attitude_violation(terminal["phi"], bc.xf.phi)
+        + terminal_violation(terminal["omega"], bc.xf.omega)
+    )
+    return {
+        "cost": float(result["cost"]),
+        "terminal_violation": float(violation),
+        "runtime_s": float(result["runtime"]),
+    }
 
 
-def print_rows(run_id: int, rows: list[dict]) -> None:
-    for row in rows:
-        cost_str = f"{row['cost']:.3e}" if np.isfinite(row["cost"]) else "FAILED"
-        viol_str = f"{row['terminal_violation']:.3e}" if np.isfinite(row["terminal_violation"]) else "FAILED"
-        print(
-            f"  [{run_id}] {row['method']:<24}"
-            f"  cost={cost_str}"
-            f"  violation={viol_str}"
-            f"  runtime={row['runtime_s']:.1f}s"
-        )
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Baseline comparison, one solver per task."
+    )
+    p.add_argument("--task-id",    type=int,  required=True)
+    p.add_argument("--scenarios",  type=Path, required=True)
+    p.add_argument("--output-dir", type=Path, default=Path("results/tasks"))
+    p.add_argument("--time-limit", type=float, default=60.0)
+    p.add_argument("--mppi-iterations", type=int,   default=20)
+    p.add_argument("--mppi-samples",    type=int,   default=10)
+    p.add_argument("--mppi-sigma",      type=float, default=0.7)
+    p.add_argument("--mppi-lambda",     type=float, default=1.0)
+    p.add_argument("--mppi-seed",       type=int,   default=42)
+    return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.seed is not None:
-        random.seed(args.seed)
-        np.random.seed(args.seed)
-        print(f"Base RNG seed: {args.seed}")
+    scenarios = load_scenarios(args.scenarios)
+    combos    = build_combos(scenarios)
+    total     = len(combos)
 
-    fieldnames = [
-        "run_id", "time_limit_s", "method",
-        "cost", "terminal_violation", "runtime_s",
-        "n_agents", "a", "e", "m", "tf", "epsilon_tol",
-    ]
+    print(f"Total combos: {total}", flush=True)
+    print(f"Task ID: {args.task_id} / {total}", flush=True)
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    failed_runs: list[int] = []
+    idx = args.task_id - 1
+    if idx < 0 or idx >= total:
+        print(f"Task ID {args.task_id} out of range (1-{total})")
+        sys.exit(1)
 
-    with args.output.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
+    combo = combos[idx]
+    print(f"Combo: sc={combo['scenario_id']} method={combo['method']}", flush=True)
 
-        for run_id in range(1, args.runs + 1):
-            print(f"\n--- Baseline run {run_id}/{args.runs} ---")
-            try:
-                # agent cap applied here, at the call site — the shared
-                # random_scenario_generator's own default range (3-30) is untouched
-                n_agents = random.randint(MIN_AGENTS, MAX_AGENTS)
-                sys_params, bc, epsilon = random_scenario_generator(fixed_agents_num=n_agents)
+    sys_params, bc, epsilon = make_sys_bc(combo["scenario"])
+    print(
+        f"  a={sys_params.a:.3e}  e={sys_params.e:.3f}  m={sys_params.m:.1f}kg  "
+        f"tf={bc.tf:.1f}s  agents={len(sys_params.rs)}  eps={epsilon:.2e}"
+    )
 
-                meta = {
-                    "n_agents":    len(sys_params.rs),
-                    "a":           sys_params.a,
-                    "e":           sys_params.e,
-                    "m":           sys_params.m,
-                    "tf":          bc.tf,
-                    "epsilon_tol": epsilon,
-                }
-                print(
-                    f"  a={meta['a']:.3e}  e={meta['e']:.3f}  "
-                    f"m={meta['m']:.1f}kg  tf={meta['tf']:.1f}s  "
-                    f"agents={meta['n_agents']}  eps={meta['epsilon_tol']:.2e}"
-                )
+    result = run_one_solver(
+        combo["method"], sys_params, bc, epsilon,
+        max_runtime_s=args.time_limit,
+        mppi_iterations=args.mppi_iterations,
+        mppi_samples=args.mppi_samples,
+        mppi_sigma=args.mppi_sigma,
+        mppi_lambda=args.mppi_lambda,
+        mppi_seed=args.mppi_seed,
+    )
 
-                rows = run_baseline_solvers(
-                    sys_params, bc, epsilon,
-                    max_runtime_s=args.time_limit,
-                    mppi_iterations=args.mppi_iterations,
-                    mppi_samples=args.mppi_samples,
-                    mppi_sigma=args.mppi_sigma,
-                    mppi_lambda=args.mppi_lambda,
-                    mppi_seed=args.mppi_seed,
-                )
+    row = {
+        "scenario_id":  combo["scenario_id"],
+        "method":       combo["method"],
+        "time_limit_s": args.time_limit,
+        "n_agents":     len(sys_params.rs),
+        "a":            sys_params.a,
+        "e":            sys_params.e,
+        "m":            sys_params.m,
+        "tf":           bc.tf,
+        "epsilon_tol":  epsilon,
+        **result,
+    }
 
-                print_rows(run_id, rows)
+    out = args.output_dir / f"task_{args.task_id:04d}.csv"
+    with out.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=FIELDNAMES)
+        w.writeheader()
+        w.writerow(row)
 
-                for row in rows:
-                    row["run_id"]       = run_id
-                    row["time_limit_s"] = args.time_limit
-                    row.update(meta)
-
-                writer.writerows(rows)
-                f.flush()
-
-            except Exception as exc:
-                print(f"  WARNING: run {run_id} failed — {exc}")
-                traceback.print_exc()
-                failed_runs.append(run_id)
-                continue
-
-    print(f"\nCompleted {args.runs - len(failed_runs)}/{args.runs} runs.")
-    if failed_runs:
-        print(f"Failed run IDs: {failed_runs}")
-    print(f"Saved results to {args.output}")
+    cost_str = f"{row['cost']:.3e}" if np.isfinite(row["cost"]) else "FAILED"
+    print(f"Done. cost={cost_str}, runtime={row['runtime_s']:.1f}s -> {out}", flush=True)
 
 
 if __name__ == "__main__":

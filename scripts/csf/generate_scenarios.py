@@ -19,6 +19,8 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--n",      type=int,  default=3)
     p.add_argument("--output", type=Path, default=None)
+    p.add_argument("--seed",   type=int,  default=None)
+    p.add_argument("--fixed-agents-num", type=int, default=-1)
     return p.parse_args()
 
 
@@ -30,13 +32,21 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
     print(f"Generating {args.n} scenarios", flush=True)
+    if args.seed is not None:
+        print(f"Base seed: {args.seed} (scenario i -> seed {args.seed}+i)", flush=True)
+    if args.fixed_agents_num > 0:                                          # <-- CHANGED: report if fixed
+        print(f"Fixed agent count: {args.fixed_agents_num}", flush=True)
+
     log = []
     for i in range(args.n):
-        sys_p, bc, eps = random_scenario_generator()
+        scenario_seed = None if args.seed is None else args.seed + i
+        sys_p, bc, eps = random_scenario_generator(
+            fixed_agents_num=args.fixed_agents_num, seed=scenario_seed)     # <-- CHANGED: pass through fixed_agents_num
         print(f"  Scenario {i+1}: N={sys_p.N}, n_agents={len(sys_p.rs)}, "
               f"tf={bc.tf:.1f}s, a={sys_p.a:.3e}, e={sys_p.e:.3f}", flush=True)
         log.append({
             "scenario_id": i + 1,
+            "seed": scenario_seed,
             "mu": sys_p.mu, "a": sys_p.a, "e": sys_p.e, "nu": sys_p.nu,
             "m": sys_p.m, "I_diag": np.diag(sys_p.I).tolist(),
             "N": sys_p.N, "tf": bc.tf, "epsilon": eps,

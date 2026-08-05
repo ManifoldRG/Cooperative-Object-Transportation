@@ -1,22 +1,31 @@
 #!/usr/bin/env python3
-"""Single MPPI sensitivity task — called by SLURM job array.
-Each task gets a unique TASK_ID mapping to a specific
-(scenario, sigma, tau_init_std, gamma, method) combination.
+"""MPPI hyperparameter sensitivity study — OAT (one-at-a-time) design.
+
+Baseline: sigma=0.25, tau=1.0, lambda=1.0, n_iter=10, n_samples=10
+Sweeps one parameter at a time across 5 values, per scenario, per method.
+
+Total tasks = n_scenarios x 4 params x 5 values x 2 methods
+            = 5 scenarios x 20 x 2 = 200  (for a 5-scenario scenarios.json)
+
 Usage:
-    python run_sensitivity_task.py --task-id 1 \
+    python run_sensitivity.py --task-id 1 \
         --scenarios results/scenarios.json \
         --output-dir results/tasks
 """
 from __future__ import annotations
-import argparse, csv, json, sys, time, traceback
+import argparse, csv, json, sys, time, traceback, warnings
 from itertools import product
 from pathlib import Path
 
-# scripts/csf/ -> scripts/ -> repo root
+warnings.filterwarnings("ignore", message="networkx backend defined more than once")
+
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 import numpy as np
+print(f"Python: {sys.version}", flush=True)
+print(f"numpy: {np.__version__}", flush=True)
+
 from spacecraft_libraries.data_structures import (
     BoundaryConditions, SystemParams, StateVectorLie,
 )
@@ -24,20 +33,23 @@ from spacecraft_libraries.evaluation.metrics import terminal_violation, lie_atti
 from spacecraft_libraries.solvers.mppi_core import run_mppi
 from spacecraft_libraries import new_opts
 
-# Total: 3 × 3 × 3 × 3 × 3 × 2 = 162 runs
-SIGMA_VALS    = [0.1, 0.25, 0.5]
-TAU_VALS      = [0.1, 0.5, 1.0]
-LAMBDA_VALS   = [0.8, 0.9, 1.0]
-GAMMA_CONFIGS = [
-    dict(gamma=0.5, n_iter=50, n_samples=100),
-    dict(gamma=1.0, n_iter=50, n_samples=50),
-    dict(gamma=2.0, n_iter=100, n_samples=50),
+# ── Baseline ──────────────────────────────────────────────────────────────────
+BASELINE = dict(sigma=0.25, lambda_=1.0, tau_init_std=1.0, n_iter=10, n_samples=10)
+
+# ── OAT sweeps ────────────────────────────────────────────────────────────────
+SWEEPS = [
+    ("sigma",    [("sigma",      v) for v in [0.1, 0.25, 0.5, 0.75, 1.0]]),
+    ("tau",      [("tau_init_std", v) for v in [0.1, 0.5, 1.0, 2.0, 5.0]]),
+    ("lambda_",  [("lambda_",    v) for v in [0.5, 0.8, 0.9, 1.0, 1.5]]),
+    ("gamma",    [("gamma",      v) for v in
+                  [(5,10), (10,10), (10,5), (20,10), (10,20)]]),
 ]
-METHODS    = ["centralized_mppi", "decentralized_mppi"]
+
+METHODS = ["centralized_mppi", "decentralized_mppi"]
 
 FIELDNAMES = [
-    "scenario_id", "method",
-    "sigma", "lambda_", "gamma", "n_iter", "n_samples", "tau_init_std",
+    "scenario_id", "method", "varied_param",
+    "sigma", "lambda_", "n_iter", "n_samples", "tau_init_std",
     "cost", "terminal_violation", "runtime_s",
     "failed_sample_fraction", "n_iter_completed",
 ]
@@ -45,25 +57,24 @@ FIELDNAMES = [
 
 def build_combos(scenarios):
     combos = []
-    for sc, sigma, tau, lambda_, gcfg, method in product(
-        scenarios, SIGMA_VALS, TAU_VALS, LAMBDA_VALS, GAMMA_CONFIGS, METHODS
-    ):
-        combos.append(dict(
-            scenario_id=sc["scenario_id"],
-            scenario=sc,
-            sigma=sigma,
-            tau_init_std=tau,
-            lambda_=lambda_,
-            gamma=gcfg["gamma"],
-            n_iter=gcfg["n_iter"],
-            n_samples=gcfg["n_samples"],
-            method=method,
-        ))
+    for sc, (param_name, values), method in product(scenarios, SWEEPS, METHODS):
+        for key, val in values:
+            cfg = dict(BASELINE)
+            if key == "gamma":
+                cfg["n_iter"], cfg["n_samples"] = val
+                cfg["gamma_label"] = f"{val[0]}iter_{val[1]}samp"
+            else:
+                cfg[key] = val
+                cfg["gamma_label"] = f"{cfg['n_iter']}iter_{cfg['n_samples']}samp"
+            combos.append(dict(
+                scenario_id=sc["scenario_id"], scenario=sc,
+                varied_param=param_name, method=method, **cfg,
+            ))
     return combos
 
 
-def load_scenarios(path: Path):
-    with path.open() as f:
+def load_scenarios(path):
+    with open(path) as f:
         return json.load(f)
 
 
@@ -74,12 +85,10 @@ def make_sys_bc(s):
         rs=[np.array(r) for r in s["rs"]], N=s["N"],
     )
     bc = BoundaryConditions(
-        x0=StateVectorLie(
-            r=np.array(s["x0_r"]), v=np.array(s["x0_v"]),
-            phi=np.array(s["x0_phi"]), omega=np.array(s["x0_omega"])),
-        xf=StateVectorLie(
-            r=np.array(s["xf_r"]), v=np.array(s["xf_v"]),
-            phi=np.array(s["xf_phi"]), omega=np.array(s["xf_omega"])),
+        x0=StateVectorLie(r=np.array(s["x0_r"]), v=np.array(s["x0_v"]),
+                          phi=np.array(s["x0_phi"]), omega=np.array(s["x0_omega"])),
+        xf=StateVectorLie(r=np.array(s["xf_r"]), v=np.array(s["xf_v"]),
+                          phi=np.array(s["xf_phi"]), omega=np.array(s["xf_omega"])),
         tf=s["tf"],
     )
     return sys_params, bc, s["epsilon"]
@@ -95,12 +104,12 @@ def _violation(traj, bc):
     )
 
 
-def _run_centralized(sys_params, bc, epsilon, nominal, rng, combo):
+def _run_centralized(sys_params, bc, epsilon, nominal, rng, cfg):
     t0 = time.perf_counter()
     best_tau, best_cost, history = run_mppi(
         sys_params, bc, epsilon, nominal,
-        n_iter=combo["n_iter"], n_samples=combo["n_samples"],
-        sigma=combo["sigma"], lambda_=combo["lambda_"], rng=rng,
+        n_iter=cfg["n_iter"], n_samples=cfg["n_samples"],
+        sigma=cfg["sigma"], lambda_=cfg["lambda_"], rng=rng,
     )
     traj, _, _, cost = new_opts.opt_given_tau_ipopt_new(
         best_tau, sys_params.N, epsilon, sys_params, bc, num_iter=1000
@@ -108,7 +117,7 @@ def _run_centralized(sys_params, bc, epsilon, nominal, rng, combo):
     return traj, float(cost), time.perf_counter() - t0, history.as_dict()
 
 
-def _run_decentralized(sys_params, bc, epsilon, rng, combo):
+def _run_decentralized(sys_params, bc, epsilon, rng, cfg):
     from scipy.spatial.distance import cdist
     import networkx as nx
 
@@ -127,11 +136,11 @@ def _run_decentralized(sys_params, bc, epsilon, rng, combo):
     island_costs, island_taus, island_histories = [], [], []
     for i in range(num_agents):
         island_rng = np.random.default_rng(rng.integers(0, 2**31 - 1))
-        nominal = island_rng.normal(0.0, combo["tau_init_std"], size=(N, 3))
+        nominal = island_rng.normal(0.0, cfg["tau_init_std"], size=(N, 3))
         best_tau, best_cost, history = run_mppi(
             sys_params, bc, epsilon, nominal,
-            n_iter=combo["n_iter"], n_samples=combo["n_samples"],
-            sigma=combo["sigma"], lambda_=combo["lambda_"], rng=island_rng,
+            n_iter=cfg["n_iter"], n_samples=cfg["n_samples"],
+            sigma=cfg["sigma"], lambda_=cfg["lambda_"], rng=island_rng,
         )
         island_taus.append(best_tau)
         island_costs.append(best_cost)
@@ -189,9 +198,9 @@ def main():
 
     combo = combos[idx]
     print(f"Combo: sc={combo['scenario_id']} method={combo['method']} "
-          f"sigma={combo['sigma']} tau={combo['tau_init_std']} "
-          f"gamma={combo['gamma']} n_iter={combo['n_iter']} "
-          f"n_samples={combo['n_samples']}", flush=True)
+          f"varied={combo['varied_param']} sigma={combo['sigma']} "
+          f"tau={combo['tau_init_std']} lambda={combo['lambda_']} "
+          f"n_iter={combo['n_iter']} n_samples={combo['n_samples']}", flush=True)
 
     sys_params, bc, epsilon = make_sys_bc(combo["scenario"])
     N   = sys_params.N
@@ -200,9 +209,10 @@ def main():
     row = {k: float("nan") for k in FIELDNAMES}
     row.update(dict(
         scenario_id=combo["scenario_id"], method=combo["method"],
+        varied_param=combo["varied_param"],
         sigma=combo["sigma"], lambda_=combo["lambda_"],
-        gamma=combo["gamma"], n_iter=combo["n_iter"],
-        n_samples=combo["n_samples"], tau_init_std=combo["tau_init_std"],
+        n_iter=combo["n_iter"], n_samples=combo["n_samples"],
+        tau_init_std=combo["tau_init_std"],
     ))
 
     try:
