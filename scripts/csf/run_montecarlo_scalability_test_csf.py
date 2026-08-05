@@ -55,6 +55,8 @@ def parse_args():
     p.add_argument("--quiet", action="store_false")
     p.add_argument("--fixed-agents-num", type=int, default=4)
     p.add_argument("--task-id",    type=int,  required=True)
+    p.add_argument("--seed",   type=int,  default=42)
+    p.add_argument("--thrust_angle",   type=float,  default=np.pi / 2.0)
     p.add_argument("--output-dir", type=Path, default=Path("results/tasks"))
     
     return p.parse_args()
@@ -173,7 +175,9 @@ def main():
 
     # get all fault events from random generator
     num_of_events = 1
-    all_scenarios = [ random_scenario_generator(args.fixed_agents_num) for i in range(num_of_events)]
+    all_scenarios = [ random_scenario_generator(fixed_agent_num=args.fixed_agents_num,
+                                                seed=args.seed,
+                                                thrust_angle=args.thrust_angle) for i in range(num_of_events)]
     if args.no_fault:
         all_fault_events = [ [] for i in range(num_of_events)]
     else:

@@ -144,7 +144,7 @@ def sample_inertia_tensor(m: float, L: float, max_tries: int = 10000, rng: rando
         return np.diag(vals)
     raise RuntimeError("sample_inertia_tensor: failed to find valid sample in max_tries")
 
-def random_scenario_generator(fixed_agents_num: int = -1, seed: int | None = None):
+def random_scenario_generator(fixed_agents_num: int = -1, seed: int | None = None, thrust_angle: float = np.pi / 2.0):
     """
     Params:
     - a : semi-major axis - 1.1 - 1.3
@@ -221,11 +221,11 @@ def random_scenario_generator(fixed_agents_num: int = -1, seed: int | None = Non
     J = sample_inertia_tensor(m, L)
 
     # Number of timesteps — scale loosely with tf so discretisation stays reasonable
-    N = max(20, int(tf / 5))
+    N = max(20, int(tf / 10))
 
     epsilon = random.uniform(1e-6, 1e-4) #fixme seed needed
 
-    sys_params = SystemParams(mu=3.98e14, a=a, e=e, nu=np.pi / 2, I=J, m=m, rs=rs, N=N)  # changes to pi/2
+    sys_params = SystemParams(mu=3.98e14, a=a, e=e, nu=thrust_angle, I=J, m=m, rs=rs, N=N)  # changes to pi/2
 
     bc = BoundaryConditions(x0=StateVectorLie(r=np.array([0, 0, 0]), v=np.array([0, 0, 0]),
                                               phi=np.array([0, 0, 0]), omega=np.array([0, 0, 0])),

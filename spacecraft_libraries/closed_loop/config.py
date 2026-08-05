@@ -32,7 +32,7 @@ class RecoveryConfig:
     rest_v_tol: float = 1e-2
     rest_w_tol: float = 1e-2
     rest_hold: int = 2
-    max_detumble_steps: int = 80000 # safety cap so a bad-gain run can't hang
+    max_detumble_steps: int = 4000 # safety cap so a bad-gain run can't hang
 
     # --- comms / fault identification ---
     agents_comms_delay_step_map: dict[int, int] = field(default_factory=dict)
