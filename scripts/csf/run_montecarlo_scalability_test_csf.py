@@ -188,7 +188,8 @@ def main():
                                                           args.fault_type,
                                                           at_least_n_survivors=args.at_least_n_survivors,
                                                           affected_radius=1.0,
-                                                          trigger_time=0 )[0] for (sys_params,bc,_) in all_scenarios]
+                                                          trigger_time=0,
+                                                          rng_seed=args.seed )[0] for (sys_params,bc,_) in all_scenarios]
     all_commdelay_maps = [comms_delay_generator(sys_params, "fixed", args.comms_delay_steps, args.random_extra_comms_delay_steps) for (sys_params,_,_) in all_scenarios]
 
     # print out scenarios, faults and communicaiton maps before running

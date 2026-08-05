@@ -25,6 +25,7 @@
 
 echo "Task ${SLURM_ARRAY_TASK_ID}/162 started: $(date)"
 echo "Node: $(hostname)"
+SEED=$(( ${SLURM_ARRAY_TASK_ID:-0})) 
 
 # Activate Python venv
 source /mnt/iusers01/eee01/r83771rr/rev_mrgp/Cooperative-Object-Transportation/.venv/bin/activate
@@ -41,6 +42,7 @@ python  /mnt/iusers01/eee01/r83771rr/rev_mrgp/Cooperative-Object-Transportation/
     --task-id ${SLURM_ARRAY_TASK_ID} \
     --output-dir /mnt/iusers01/eee01/r83771rr/scratch/scalability_closedloop/ \
     --fixed-agents-num 4 \
-    --at-least-n-survivors 3
+    --at-least-n-survivors 3 \
+    --seed "$SEED"
 
 echo "Task ${SLURM_ARRAY_TASK_ID} finished: $(date)"

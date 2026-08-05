@@ -422,7 +422,8 @@ def random_dropout_fault_generator(sys_params: SystemParams,
                                    at_least_n_survivors: int = 2,
                                    num_seeds: int = 2,
                                    affected_radius: float=3.0,
-                                   trigger_time: float=0.5) -> list[list[FaultEvent]]:
+                                   trigger_time: float=0.5,
+                                   rng_seed: int | None = 42) -> list[list[FaultEvent]]:
     print(
         f"[Fault Generator] "
         f"model={fault_model}, "
@@ -431,6 +432,8 @@ def random_dropout_fault_generator(sys_params: SystemParams,
         f"num_seeds={num_seeds}, "
         f"affected_radius={affected_radius:.2f} m"
     )
+
+    rng = random.Random(rng_seed) if rng_seed is not None else random
 
     all_fault_model = ["random", "localized", "clustered"]  # specific to fault event
     all_fault_type = ["actuation", "comms", "both"]  # specific to each faulted agent
@@ -455,17 +458,17 @@ def random_dropout_fault_generator(sys_params: SystemParams,
 
         # choose how many agents fail. At least n agents remain functional
         max_faults = max(1, num_agents - at_least_n_survivors)
-        n_faults = random.randint(1, max_faults)
+        n_faults = rng.randint(1, max_faults)
 
         # obtain the faulted_agenets based on the fault_model
         if (fault_model == "random"):
             # randomly choose which agents fail
-            faulted_agents = random.sample(agent_ids, n_faults)
+            faulted_agents = rng.sample(agent_ids, n_faults)
 
         elif (fault_model == "localized"):
             # fault based on physical distance
             # Choose one random agent as the center/seed, then fault nearest agents.
-            center_agent_id = random.sample(agent_ids, 1)[0]
+            center_agent_id = rng.sample(agent_ids, 1)[0]
             center_pos = rs[center_agent_id]
             sorted_agents = sorted(agent_ids,
                                    key=lambda i: np.linalg.norm(rs[i] - center_pos))
@@ -475,7 +478,7 @@ def random_dropout_fault_generator(sys_params: SystemParams,
             # similar to localized model, but instead of one random seed, multiple seeds are allowed.
             # Consequently, the nearby agents of the seeds will also be faulted
             # defined by num_seed , and affected_radius
-            seed_ids = random.sample(agent_ids, min(num_seeds, max_faults))
+            seed_ids = rng.sample(agent_ids, min(num_seeds, max_faults))
 
             faulted_set = set(seed_ids)
             for seed_id in seed_ids:
@@ -498,13 +501,13 @@ def random_dropout_fault_generator(sys_params: SystemParams,
         for agent_id in faulted_agents:
             # choose when failure happens
             if  trigger_time != 0 :
-                trigger_time = random.uniform(0.1* tf, trigger_time * tf)
+                trigger_time = rng.uniform(0.1* tf, trigger_time * tf)
 
             # choose fault_type
             if (_fault_type in all_fault_type):
                 chosen_fault_type = _fault_type
             else:
-                chosen_fault_type = all_fault_type[random.randint(0, 2)]
+                chosen_fault_type = all_fault_type[rng.randint(0, 2)]
             events.append(FaultEvent(agent_id=agent_id,
                                      trigger_time=trigger_time,
                                      fault_type=chosen_fault_type))
