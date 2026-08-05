@@ -14,11 +14,13 @@ from ..solvers import (
     solve_decentralized_island_ga,
     solve_decentralized_mppi,
 )
+from ..solvers.centralized_nlp import solve_centralized_nlp_warm  # changed: added import for warm-start NLP solver
 from .metrics import lie_attitude_violation, terminal_violation
 from ..solver_logger import set_scenario_context, clear_scenario_context, log_nlp_failure
 import random
 from ..new_opts import so3_log
 from ..closed_loop.faults import FaultEvent
+
 
 @contextmanager
 def _suppress_solver_output(enabled: bool):
@@ -39,6 +41,7 @@ def _render_loading_bar(completed: int, total: int) -> None:
         print()
 
 def many_agent_scenario_gen(numagents, seed: int | None = None):
+    rng = random.Random(seed) if seed is not None else random
     rsfull = [np.array([1 / 2, 1, 3 / 2]),
               np.array([0, 1 / 2, 2]),
               np.array([-1 / 2, 1, -3 / 2]),
@@ -111,7 +114,7 @@ def many_agent_scenario_gen(numagents, seed: int | None = None):
               np.array([0.59, -2.01, -2.47]),
               np.array([-1.02, 1.93, -2.46])
               ]
-    rand_rs = random.sample(rsfull, numagents) #fixme seed needed
+    rand_rs = rng.sample(rsfull, numagents)
     rand_sys = SystemParams(mu=3.98e14, a=8e6, e=0.2, nu=np.pi/4, I=1000*np.diag([1,2,3]),m=100, rs=rand_rs, N=20)
     rand_bc = BoundaryConditions(x0=StateVectorLie(r=np.array([0, 0, 0]), v=np.array([0, 0, 0]), #changed: quaternion to Twist
         phi=np.array([0, 0, 0]),omega=np.array([0, 0, 0])),
@@ -122,6 +125,7 @@ def many_agent_scenario_gen(numagents, seed: int | None = None):
 
     # rand_bc = BoundaryConditions(~)
     return rand_sys,rand_bc, 1e-5
+
 
 def sample_inertia_tensor(m: float, L: float, max_tries: int = 10000, rng: random.Random = None) -> np.ndarray:
     """
@@ -144,7 +148,7 @@ def sample_inertia_tensor(m: float, L: float, max_tries: int = 10000, rng: rando
         return np.diag(vals)
     raise RuntimeError("sample_inertia_tensor: failed to find valid sample in max_tries")
 
-def random_scenario_generator(fixed_agents_num: int = -1, seed: int | None = None, thrust_angle: float = np.pi / 2.0):
+def random_scenario_generator(fixed_agents_num: int = -1, seed: int | None =42):
     """
     Params:
     - a : semi-major axis - 1.1 - 1.3
@@ -156,14 +160,19 @@ def random_scenario_generator(fixed_agents_num: int = -1, seed: int | None = Non
     - tf : final time : random time within 1 - 10 mins # change to larger (10-60 mins)
     - agent placement : random within 10m radius sphere
     - number of agents  : 3 - 6, random value with max 6 min 3. [capped for baseline comparison tractability]
+    - seed : if given, all draws in this call come from a local RNG scoped to
+      this call. If None, falls back to the global random/np.random state
+      (unchanged behavior — existing scripts that seed globally still work).
     """
+    rng    = random.Random(seed) if seed is not None else random
+    np_rng = np.random.default_rng(seed) if seed is not None else np.random
 
     # Semi-major axis: 1.1–1.3 × Earth radius
     R_earth = 6.371e6
-    a = random.uniform(1.1, 1.3) * R_earth #fixme seed needed
+    a = rng.uniform(1.1, 1.3) * R_earth
 
     # Eccentricity
-    e = random.uniform(0.01, 0.3) #fixme seed needed
+    e = rng.uniform(0.01, 0.3)
 
     # # Inertia tensor: random diagonal, each principal moment in (1, 5000)
     # diag_vals = np.array([random.uniform(1, 500) for _ in range(3)])
@@ -172,15 +181,15 @@ def random_scenario_generator(fixed_agents_num: int = -1, seed: int | None = Non
     # while diag_vals[2] >= diag_vals[0] + diag_vals[1]:
     #     diag_vals = np.sort(np.array([random.uniform(1, 5000) for _ in range(3)]))
     #J = np.diag(diag_vals)
-    m = random.uniform(1, 500) #fixme seed needed
+    m = rng.uniform(1, 500)
     #J = sample_inertia_tensor(m)
 
     # Payload mass (kg)
 
 
     # Final position: random point within 1km radius sphere
-    r_mag = random.uniform(0, 1000)  # metres #fixme seed needed
-    r_dir = np.random.randn(3) #fixme seed needed
+    r_mag = rng.uniform(0, 1000)  # metres
+    r_dir = np_rng.standard_normal(3)
     r_dir /= np.linalg.norm(r_dir)
     rb = r_dir * r_mag
 
@@ -189,7 +198,7 @@ def random_scenario_generator(fixed_agents_num: int = -1, seed: int | None = Non
     # epsilon_b = q_raw / np.linalg.norm(q_raw)
 
     # generating the quaternion first and then converting to twist
-    q_raw = np.random.randn(4) #fixme seed needed
+    q_raw = np_rng.standard_normal(4)
     q_raw /= np.linalg.norm(q_raw)
     x, y, z, w = q_raw
     R = np.array([
@@ -200,32 +209,32 @@ def random_scenario_generator(fixed_agents_num: int = -1, seed: int | None = Non
     phi_b = so3_log(R)
 
     # Final time: 1–10 minutes in seconds
-    tf = random.uniform(300, 900) #fixme seed needed
+    tf = rng.uniform(300, 900)
 
     # Number of agents and their positions (within 10m radius sphere)
-    if fixed_agents_num <= 0: #fixme seed needed
-        n_agents = random.randint(3, 6)  # changed: agent count cap reduced from 30 to 6 for baseline tractability
+    if fixed_agents_num <= 0:
+        n_agents = rng.randint(3, 6)  # changed: agent count cap reduced from 30 to 6 for baseline tractability
     else:
         n_agents = fixed_agents_num
 
     rs = []
     for _ in range(n_agents):
-        mag = random.uniform(5, 50) #fixme seed needed
-        direction = np.random.randn(3) #fixme seed needed
+        mag = rng.uniform(5, 50)
+        direction = np_rng.standard_normal(3)
         direction /= np.linalg.norm(direction)
         rs.append(direction * mag)
 
     L = max(np.linalg.norm(r) for r in rs)
 
     # Inertia tensor
-    J = sample_inertia_tensor(m, L)
+    J = sample_inertia_tensor(m, L, rng=rng)
 
     # Number of timesteps — scale loosely with tf so discretisation stays reasonable
-    N = max(20, int(tf / 10))
+    N = max(20, int(tf / 5)) #change to tf/10
 
-    epsilon = random.uniform(1e-6, 1e-4) #fixme seed needed
+    epsilon = rng.uniform(1e-6, 1e-4)
 
-    sys_params = SystemParams(mu=3.98e14, a=a, e=e, nu=thrust_angle, I=J, m=m, rs=rs, N=N)  # changes to pi/2
+    sys_params = SystemParams(mu=3.98e14, a=a, e=e, nu=np.pi / 2, I=J, m=m, rs=rs, N=N)  # changes to pi/2
 
     bc = BoundaryConditions(x0=StateVectorLie(r=np.array([0, 0, 0]), v=np.array([0, 0, 0]),
                                               phi=np.array([0, 0, 0]), omega=np.array([0, 0, 0])),
@@ -248,8 +257,9 @@ def scenario_1() -> tuple[SystemParams, BoundaryConditions, float]:
         N=20,
     )
     bc = BoundaryConditions(
-        x0=StateVectorLie(r=np.array([0,0,0]), v=np.array([0,0,0]), phi=np.zeros(3), omega=np.zeros(3)),
-        xf=StateVectorLie(r=np.array([5,5,5]), v=np.array([0,0,0]), phi=np.array([1.20919958, 1.20919958, 1.20919958]), omega=np.zeros(3)),
+        x0=StateVectorLie(r=np.array([0, 0, 0]), v=np.array([0, 0, 0]), phi=np.zeros(3), omega=np.zeros(3)),
+        xf=StateVectorLie(r=np.array([5, 5, 5]), v=np.array([0, 0, 0]),
+                          phi=np.array([1.20919958, 1.20919958, 1.20919958]), omega=np.zeros(3)),
         tf=50,
     )
     return sys_params, bc, 1e-5
@@ -268,8 +278,9 @@ def scenario_2() -> tuple[SystemParams, BoundaryConditions, float]:
         N=25,
     )
     bc = BoundaryConditions(
-        x0=StateVectorLie(r=np.array([0,0,0]), v=np.array([0,0,0]), phi=np.zeros(3), omega=np.zeros(3)),
-        xf=StateVectorLie(r=np.array([7,4,6]), v=np.array([0,0,0]), phi=np.array([0.0, np.pi/2, 0.0]), omega=np.zeros(3)),
+        x0=StateVectorLie(r=np.array([0, 0, 0]), v=np.array([0, 0, 0]), phi=np.zeros(3), omega=np.zeros(3)),
+        xf=StateVectorLie(r=np.array([7, 4, 6]), v=np.array([0, 0, 0]), phi=np.array([0.0, np.pi / 2, 0.0]),
+                          omega=np.zeros(3)),
         tf=60,
     )
     return sys_params, bc, 1e-4
@@ -288,8 +299,9 @@ def scenario_3() -> tuple[SystemParams, BoundaryConditions, float]:
         N=30,
     )
     bc = BoundaryConditions(
-        x0=StateVectorLie(r=np.array([0,0,0]), v=np.array([0,0,0]), phi=np.zeros(3), omega=np.zeros(3)),
-        xf=StateVectorLie(r=np.array([4,6,3]), v=np.array([0,0,0]), phi=np.array([np.pi/2, -np.pi/2, np.pi/2]), omega=np.zeros(3)),
+        x0=StateVectorLie(r=np.array([0, 0, 0]), v=np.array([0, 0, 0]), phi=np.zeros(3), omega=np.zeros(3)),
+        xf=StateVectorLie(r=np.array([4, 6, 3]), v=np.array([0, 0, 0]),
+                          phi=np.array([np.pi / 2, -np.pi / 2, np.pi / 2]), omega=np.zeros(3)),
         tf=45,
     )
     return sys_params, bc, 5e-5
@@ -309,11 +321,10 @@ def scaling_base_scenario() -> tuple[SystemParams, BoundaryConditions, float]:
     identical across every agent count in the sweep.
     """
     sys_params, bc, epsilon = random_scenario_generator()
-    sys_params.rs = []   # strip agents — caller injects them per sweep step
+    sys_params.rs = []  # strip agents — caller injects them per sweep step
     return sys_params, bc, epsilon
 
-
-def scaling_inject_agents(base_sys: SystemParams,base_bc: BoundaryConditions,epsilon: float,n_agents: int, seed: int | None = None) -> tuple[SystemParams, BoundaryConditions, float]:
+def scaling_inject_agents(base_sys: SystemParams, base_bc: BoundaryConditions, epsilon: float, n_agents: int, seed: int | None = None) -> tuple[SystemParams, BoundaryConditions, float]:
     """
     Clone base_sys and populate rs with n_agents freshly randomised attachment
     vectors using the same placement rule as random_scenario_generator:
@@ -321,10 +332,13 @@ def scaling_inject_agents(base_sys: SystemParams,base_bc: BoundaryConditions,eps
 
     All other parameters are taken unchanged from base_sys.
     """
+    rng    = random.Random(seed) if seed is not None else random
+    np_rng = np.random.default_rng(seed) if seed is not None else np.random
+
     rs = []
     for _ in range(n_agents):
-        mag = random.uniform(0, 10)
-        direction = np.random.randn(3)
+        mag = rng.uniform(0, 10)
+        direction = np_rng.standard_normal(3)
         direction /= np.linalg.norm(direction)
         rs.append(direction * mag)
 
@@ -340,7 +354,6 @@ def scaling_inject_agents(base_sys: SystemParams,base_bc: BoundaryConditions,eps
     )
     return sys_params, base_bc, epsilon
 
-
 def get_scenario(scenario_id: int, numagents=3) -> tuple[SystemParams, BoundaryConditions, float]:
     scenarios = {1: scenario_1, 2: scenario_2, 3: scenario_3}
     if scenario_id == 4:
@@ -355,13 +368,13 @@ def get_scenario(scenario_id: int, numagents=3) -> tuple[SystemParams, BoundaryC
 def default_scenario() -> tuple[SystemParams, BoundaryConditions, float]:
     return scenario_1()
 
+
 # it output a map of { agent_id : delay_time }
 # each agent can have a unique random delay time for mode="random", and non-zero extra_time_step
-def comms_delay_generator(sys_params: SystemParams, 
-                                 mode: str="fixed",
-                                 delay_time_step: int=2,
-                                 extra_time_step: int=0 ) -> dict[int,int]:
-
+def comms_delay_generator(sys_params: SystemParams,
+                          mode: str = "fixed",
+                          delay_time_step: int = 2,
+                          extra_time_step: int = 0) -> dict[int, int]:
     if mode not in {"fixed", "random"}:
         raise ValueError("mode must be either fixed or random")
 
@@ -372,14 +385,14 @@ def comms_delay_generator(sys_params: SystemParams,
     agents_comms_delay_step_map: dict[int, int] = {}
 
     for aid in range(num_agents):
-        if ( mode=="random" ):
-            agents_comms_delay_step_map[aid] = delay_time_step + random.randint(0,extra_time_step)
+        if (mode == "random"):
+            agents_comms_delay_step_map[aid] = delay_time_step + random.randint(0, extra_time_step)
+        else:
             agents_comms_delay_step_map[aid] = delay_time_step
 
     return agents_comms_delay_step_map
-    
-    
-    
+
+
 #    Generate random fault scenarios for testing swarm recovery simulations.
 #
 #    Supports three fault models:
@@ -389,25 +402,24 @@ def comms_delay_generator(sys_params: SystemParams,
 #    The first returned entry is always a no-fault scenario ([]).
 #
 #
-#    Usage: 
+#    Usage:
 #        - Intened to be used after get_scenario. Here are some examples
 #           all_fault_events = random_dropout_fault_generator( sys_params, bc.tf, 10, "clustered", at_least_n_survivors=2, affected_radius=1.0 )
 #           all_fault_events = random_dropout_fault_generator( sys_params, bc.tf, 10, "random", at_least_n_survivors=2 )
 #        - then we pass the events into run_recovery_sim
-#            result = run_recovery_episode(sys_params, bc, epsilon, fault_events=fevent, cfg=cfg, verbose=True)       
+#            result = run_recovery_episode(sys_params, bc, epsilon, fault_events=fevent, cfg=cfg, verbose=True)
 #
 #    Note:
 #        - num_seeds and affected_radius are only used by the clustered model.
 #        - trigger time is chosen randomly between [0.1 - 0.5] *tf
-def random_dropout_fault_generator(sys_params: SystemParams, 
+def random_dropout_fault_generator(sys_params: SystemParams,
                                    tf: float,
-                                   num_of_events: int=10,
-                                   fault_model: str="random",
-                                   _fault_type: str="both",
-                                   at_least_n_survivors: int=2,
-                                   num_seeds: int=2,
-                                   affected_radius: float=3.0,  
-                                   trigger_time: float=0.5) -> list[list[FaultEvent]]:
+                                   num_of_events: int = 10,
+                                   fault_model: str = "random",
+                                   _fault_type: str = "both",
+                                   at_least_n_survivors: int = 2,
+                                   num_seeds: int = 2,
+                                   affected_radius: float = 3.0) -> list[list[FaultEvent]]:
     print(
         f"[Fault Generator] "
         f"model={fault_model}, "
@@ -417,50 +429,50 @@ def random_dropout_fault_generator(sys_params: SystemParams,
         f"affected_radius={affected_radius:.2f} m"
     )
 
-    all_fault_model = ["random", "localized", "clustered"] # specific to fault event 
-    all_fault_type = [ "actuation", "comms", "both" ] # specific to each faulted agent
+    all_fault_model = ["random", "localized", "clustered"]  # specific to fault event
+    all_fault_type = ["actuation", "comms", "both"]  # specific to each faulted agent
 
     # intialize with a no fault model first
     num_agents = len(sys_params.rs)
     agent_ids = list(range(num_agents))
     rs = np.asarray(sys_params.rs)
-    all_fault_events = []
+    all_fault_events = [[]]
 
     # check selected fault_model
-    if ( fault_model not in all_fault_model ):
-         print(f"Unknown fault model: {fault_model}. It must be one of the three \"random, localized, clustered.\"")
-         return all_fault_events
+    if (fault_model not in all_fault_model):
+        print(f"Unknown fault model: {fault_model}. It must be one of the three \"random, localized, clustered.\"")
+        return all_fault_events
 
-     # check number of agents 
-    if ( len(sys_params.rs) <= at_least_n_survivors ):
+    # check number of agents
+    if (len(sys_params.rs) <= at_least_n_survivors):
         return all_fault_events
 
     for i in range(num_of_events):
         events = []
 
         # choose how many agents fail. At least n agents remain functional
-        max_faults = max(1, num_agents-at_least_n_survivors)
+        max_faults = max(1, num_agents - at_least_n_survivors)
         n_faults = random.randint(1, max_faults)
 
         # obtain the faulted_agenets based on the fault_model
-        if ( fault_model == "random" ):
+        if (fault_model == "random"):
             # randomly choose which agents fail
             faulted_agents = random.sample(agent_ids, n_faults)
 
-        elif ( fault_model == "localized" ):
+        elif (fault_model == "localized"):
             # fault based on physical distance
             # Choose one random agent as the center/seed, then fault nearest agents.
-            center_agent_id = random.sample(agent_ids,1)[0]
+            center_agent_id = random.sample(agent_ids, 1)[0]
             center_pos = rs[center_agent_id]
             sorted_agents = sorted(agent_ids,
                                    key=lambda i: np.linalg.norm(rs[i] - center_pos))
             faulted_agents = sorted_agents[:n_faults]
 
-        elif ( fault_model == "clustered" ):
-            # similar to localized model, but instead of one random seed, multiple seeds are allowed. 
+        elif (fault_model == "clustered"):
+            # similar to localized model, but instead of one random seed, multiple seeds are allowed.
             # Consequently, the nearby agents of the seeds will also be faulted
             # defined by num_seed , and affected_radius
-            seed_ids = random.sample( agent_ids, min(num_seeds, max_faults))
+            seed_ids = random.sample(agent_ids, min(num_seeds, max_faults))
 
             faulted_set = set(seed_ids)
             for seed_id in seed_ids:
@@ -476,28 +488,29 @@ def random_dropout_fault_generator(sys_params: SystemParams,
 
                 if len(list(faulted_set)) >= max_faults:
                     break
-       
+
             faulted_agents = list(faulted_set)
 
         # generate the FaultEvent based on the collected faulted_agents
         for agent_id in faulted_agents:
             # choose when failure happens
-            if  trigger_time != 0 :
-                trigger_time = random.uniform(0.1* tf, trigger_time * tf)
+            trigger_time = random.uniform(0.1 * tf, 0.5 * tf)
 
             # choose fault_type
-            if ( _fault_type in all_fault_type ):
+            if (_fault_type in all_fault_type):
                 chosen_fault_type = _fault_type
-            else :
+            else:
                 chosen_fault_type = all_fault_type[random.randint(0, 2)]
-            events.append( FaultEvent(agent_id=agent_id,
-                                      trigger_time=trigger_time,
-                                      fault_type=chosen_fault_type))
-        all_fault_events.append( events )
+            events.append(FaultEvent(agent_id=agent_id,
+                                     trigger_time=trigger_time,
+                                     fault_type=chosen_fault_type))
+        all_fault_events.append(events)
     return all_fault_events
 
+
 def _extract_terminal_state(result, method: str):
-    if method == "centralized_nlp":
+    # changed: now also matches centralized_nlp_warm, which shares the same 12-col state layout
+    if method in ("centralized_nlp", "centralized_nlp_warm"):
         x = result["state"]
         # 12-col layout: [r(3), v(3), phi(3), omega(3)]
         return {"r": x[-1, 0:3], "v": x[-1, 3:6], "phi": x[-1, 6:9], "omega": x[-1, 9:12]}
@@ -507,32 +520,50 @@ def _extract_terminal_state(result, method: str):
 
 
 def run_method_comparison(
-    sys_params: SystemParams,
-    bc: BoundaryConditions,
-    epsilon: float,
-    max_runtime_s: float | None = None,
-    show_progress: bool = False,
-    silence_solver_output: bool = True,
-    mppi_iterations: int = 5,
-    mppi_samples: int = 10,
-    mppi_sigma: float = 1e-1,
-    mppi_lambda: float = 1.0,
-    mppi_base_seed: int = 42,
-    include_mppi: bool = True,
+        sys_params: SystemParams,
+        bc: BoundaryConditions,
+        epsilon: float,
+        max_runtime_s: float | None = None,
+        show_progress: bool = False,
+        silence_solver_output: bool = True,
+        mppi_iterations: int = 5,
+        mppi_samples: int = 10,
+        mppi_sigma: float = 1e-1,
+        mppi_lambda: float = 1.0,
+        mppi_base_seed: int = 42,
+        include_mppi: bool = True,
+        include_warm_nlp: bool = False,  # changed: added flag to optionally include warm-start NLP
+        include_decentralized_ga: bool = True,  # changed: added flag to optionally exclude decentralized island GA
 ):
     solver_calls = [
         lambda: solve_centralized_nlp(sys_params, bc, max_iters=3000, max_runtime_s=max_runtime_s),
-        lambda: solve_centralized_ga(sys_params, bc, epsilon, pop_size=10, generations=5000, max_runtime_s=max_runtime_s),
-        lambda: solve_decentralized_island_ga(
-            sys_params,
-            bc,
-            epsilon,
-            pop_size=5,
-            migration_rounds=5000,
-            max_runtime_s=max_runtime_s,
-        ),
     ]
-    method_names = ["centralized_nlp", "centralized_ga", "decentralized_island_ga"]
+    method_names = ["centralized_nlp"]
+
+    if include_warm_nlp:  # changed: conditionally appends warm-start NLP solver call
+        solver_calls.append(
+            lambda: solve_centralized_nlp_warm(sys_params, bc, max_iters=3000, max_runtime_s=max_runtime_s)
+        )
+        method_names.append("centralized_nlp_warm")
+
+    solver_calls.append(
+        lambda: solve_centralized_ga(sys_params, bc, epsilon, pop_size=10, generations=5000,
+                                     max_runtime_s=max_runtime_s)
+    )
+    method_names.append("centralized_ga")
+
+    if include_decentralized_ga:  # changed: decentralized island GA now optional
+        solver_calls.append(
+            lambda: solve_decentralized_island_ga(
+                sys_params,
+                bc,
+                epsilon,
+                pop_size=5,
+                migration_rounds=5000,
+                max_runtime_s=max_runtime_s,
+            )
+        )
+        method_names.append("decentralized_island_ga")
 
     if include_mppi:
         solver_calls.extend([
@@ -573,8 +604,8 @@ def run_method_comparison(
             a=sys_params.a, e=sys_params.e, m=sys_params.m, tf=bc.tf,
         )
         try:
-             with _suppress_solver_output(silence_solver_output):
-                    results.append(solver())
+            with _suppress_solver_output(silence_solver_output):
+                results.append(solver())
         except Exception as exc:
             import traceback
             log_nlp_failure(
@@ -608,10 +639,10 @@ def run_method_comparison(
             continue
         terminal = _extract_terminal_state(result, result["method"])
         violation = (
-            terminal_violation(terminal["r"], bc.xf.r)
-            + terminal_violation(terminal["v"], bc.xf.v)
-            + lie_attitude_violation(terminal["phi"], bc.xf.phi)
-            + terminal_violation(terminal["omega"], bc.xf.omega)
+                terminal_violation(terminal["r"], bc.xf.r)
+                + terminal_violation(terminal["v"], bc.xf.v)
+                + lie_attitude_violation(terminal["phi"], bc.xf.phi)
+                + terminal_violation(terminal["omega"], bc.xf.omega)
         )
         table.append(
             {
