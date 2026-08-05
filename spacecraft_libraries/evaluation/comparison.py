@@ -148,22 +148,24 @@ def sample_inertia_tensor(m: float, L: float, max_tries: int = 10000, rng: rando
         return np.diag(vals)
     raise RuntimeError("sample_inertia_tensor: failed to find valid sample in max_tries")
 
-def random_scenario_generator(fixed_agents_num: int = -1, seed: int | None =42):
+def random_scenario_generator(fixed_agents_num: int = -1, 
+                              seed: int | None = 42, 
+                              thrust_angle: float = np.pi / 2.0):
     """
-    Params:
-    - a : semi-major axis - 1.1 - 1.3
-    - e : Eccentricity - 0.01 - 0.3
-    - J : Inertia Tensor - random diagonal matrix with a maximum of 500 #change to 500
-    - m : Payload Mass - random from 1 - 500 Kgs #change to 500
-    - rb : Final position - random location within 1Km radius to ensure linearised dyanmics hold constant
-    - epsilon_b : Final attitude quaternion - any random quaternion
-    - tf : final time : random time within 1 - 10 mins # change to larger (10-60 mins)
-    - agent placement : random within 10m radius sphere
-    - number of agents  : 3 - 6, random value with max 6 min 3. [capped for baseline comparison tractability]
-    - seed : if given, all draws in this call come from a local RNG scoped to
-      this call. If None, falls back to the global random/np.random state
-      (unchanged behavior — existing scripts that seed globally still work).
-    """
+        Params:
+        - a : semi-major axis - 1.1 - 1.3
+        - e : Eccentricity - 0.01 - 0.3
+        - J : Inertia Tensor - random diagonal matrix with a maximum of 500 #change to 500
+        - m : Payload Mass - random from 1 - 500 Kgs #change to 500
+        - rb : Final position - random location within 1Km radius to ensure linearised dyanmics hold constant
+        - epsilon_b : Final attitude quaternion - any random quaternion
+        - tf : final time : random time within 1 - 10 mins # change to larger (10-60 mins)
+        - agent placement : random within 10m radius sphere
+        - number of agents  : 3 - 6, random value with max 6 min 3. [capped for baseline comparison tractability]
+        - seed : if given, all draws in this call come from a local RNG scoped to
+          this call. If None, falls back to the global random/np.random state
+          (unchanged behavior — existing scripts that seed globally still work).
+        """
     rng    = random.Random(seed) if seed is not None else random
     np_rng = np.random.default_rng(seed) if seed is not None else np.random
 
@@ -230,11 +232,11 @@ def random_scenario_generator(fixed_agents_num: int = -1, seed: int | None =42):
     J = sample_inertia_tensor(m, L, rng=rng)
 
     # Number of timesteps — scale loosely with tf so discretisation stays reasonable
-    N = max(20, int(tf / 5)) #change to tf/10
+    N = max(20, int(tf / 10)) #change to tf/10
 
     epsilon = rng.uniform(1e-6, 1e-4)
 
-    sys_params = SystemParams(mu=3.98e14, a=a, e=e, nu=np.pi / 2, I=J, m=m, rs=rs, N=N)  # changes to pi/2
+    sys_params = SystemParams(mu=3.98e14, a=a, e=e, nu=thrust_angle, I=J, m=m, rs=rs, N=N)  # changes to pi/2
 
     bc = BoundaryConditions(x0=StateVectorLie(r=np.array([0, 0, 0]), v=np.array([0, 0, 0]),
                                               phi=np.array([0, 0, 0]), omega=np.array([0, 0, 0])),
@@ -419,7 +421,8 @@ def random_dropout_fault_generator(sys_params: SystemParams,
                                    _fault_type: str = "both",
                                    at_least_n_survivors: int = 2,
                                    num_seeds: int = 2,
-                                   affected_radius: float = 3.0) -> list[list[FaultEvent]]:
+                                   affected_radius: float=3.0,
+                                   trigger_time: float=0.5) -> list[list[FaultEvent]]:
     print(
         f"[Fault Generator] "
         f"model={fault_model}, "
@@ -436,7 +439,7 @@ def random_dropout_fault_generator(sys_params: SystemParams,
     num_agents = len(sys_params.rs)
     agent_ids = list(range(num_agents))
     rs = np.asarray(sys_params.rs)
-    all_fault_events = [[]]
+    all_fault_events = []
 
     # check selected fault_model
     if (fault_model not in all_fault_model):
@@ -494,7 +497,8 @@ def random_dropout_fault_generator(sys_params: SystemParams,
         # generate the FaultEvent based on the collected faulted_agents
         for agent_id in faulted_agents:
             # choose when failure happens
-            trigger_time = random.uniform(0.1 * tf, 0.5 * tf)
+            if  trigger_time != 0 :
+                trigger_time = random.uniform(0.1* tf, trigger_time * tf)
 
             # choose fault_type
             if (_fault_type in all_fault_type):
