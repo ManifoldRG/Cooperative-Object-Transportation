@@ -175,7 +175,7 @@ def main():
 
     # get all fault events from random generator
     num_of_events = 1
-    all_scenarios = [ random_scenario_generator(fixed_agent_num=args.fixed_agents_num,
+    all_scenarios = [ random_scenario_generator(fixed_agents_num=args.fixed_agents_num,
                                                 seed=args.seed,
                                                 thrust_angle=args.thrust_angle) for i in range(num_of_events)]
     if args.no_fault:
