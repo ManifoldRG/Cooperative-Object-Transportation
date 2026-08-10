@@ -27,7 +27,7 @@ from spacecraft_libraries.data_structures import (
 from spacecraft_libraries.evaluation.metrics import lie_attitude_violation, terminal_violation
 from spacecraft_libraries.solvers.centralized_nlp import solve_centralized_nlp, solve_centralized_nlp_warm
 from spacecraft_libraries.solvers.centralized_ga import solve_centralized_ga
-from spacecraft_libraries.solvers.mppi_core import run_mppi
+from spacecraft_libraries.solvers.mppi_core import make_nominal_tau, run_mppi
 from spacecraft_libraries.solvers.decentralized_mppi import (
     _build_line_of_sight_graph_with_degree, _max_consensus,
 )
@@ -95,18 +95,23 @@ def derive_solver_seed(scenario: dict, time_limit: float, fallback_seed: int) ->
     return int(base) * 10007 + int(time_limit)
 
 
-def _gaussian_nominal(rng: np.random.Generator, N: int, tau_init_std: float) -> np.ndarray:
-    return rng.normal(0.0, tau_init_std, size=(N, 3))
+def _warm_nominal(sys_params, bc, epsilon, rng: np.random.Generator,
+                  tau_init_scale: float) -> np.ndarray:
+    """Multiple-shooting warm start — the SAME initialization family the GA's
+    pop_gen_new uses for its population, so GA and MPPI start from the same
+    information. tau_init_scale is the scale of the uniform random tau guess
+    fed to the shooting IPOPT (GA default: 1e-1)."""
+    return make_nominal_tau(sys_params, bc, epsilon, rng, tau_init_scale=tau_init_scale)
 
 
-def run_centralized_mppi_gaussian_start(sys_params, bc, epsilon, n_iter, n_samples,
-                                         sigma, lambda_, tau_init_std, seed,
-                                         max_runtime_s):
+def run_centralized_mppi_warm_start(sys_params, bc, epsilon, n_iter, n_samples,
+                                    sigma, lambda_, tau_init_std, seed,
+                                    max_runtime_s):
     rng = np.random.default_rng(seed)
     start = time.perf_counter()
     N = sys_params.N
 
-    nominal = _gaussian_nominal(rng, N, tau_init_std)
+    nominal = _warm_nominal(sys_params, bc, epsilon, rng, tau_init_std)
 
     best_tau, best_cost, history = run_mppi(
         sys_params, bc, epsilon,
@@ -135,10 +140,10 @@ def run_centralized_mppi_gaussian_start(sys_params, bc, epsilon, n_iter, n_sampl
     }
 
 
-def run_decentralized_mppi_gaussian_start(sys_params, bc, epsilon, n_iter, n_samples,
-                                           sigma, lambda_, tau_init_std, base_seed,
-                                           max_runtime_s, line_of_sight_limit=100.0,
-                                           graph_degree=None):
+def run_decentralized_mppi_warm_start(sys_params, bc, epsilon, n_iter, n_samples,
+                                      sigma, lambda_, tau_init_std, base_seed,
+                                      max_runtime_s, line_of_sight_limit=100.0,
+                                      graph_degree=None):
     attach_vecs = np.asarray(sys_params.rs)
     num_agents = attach_vecs.shape[0]
     graph = _build_line_of_sight_graph_with_degree(attach_vecs, line_of_sight_limit, graph_degree)
@@ -154,7 +159,7 @@ def run_decentralized_mppi_gaussian_start(sys_params, bc, epsilon, n_iter, n_sam
         if effective_limit is not None and (time.perf_counter() - start) >= effective_limit:
             break
         rng = np.random.default_rng(base_seed + i)
-        nominal = _gaussian_nominal(rng, sys_params.N, tau_init_std)
+        nominal = _warm_nominal(sys_params, bc, epsilon, rng, tau_init_std)
         best_tau, best_cost, history = run_mppi(
             sys_params, bc, epsilon,
             nominal_tau=nominal,
@@ -231,12 +236,12 @@ def run_one_solver(method: str, sys_params, bc, epsilon, max_runtime_s: float,
         "centralized_ga": lambda: run_centralized_ga_seeded(
             sys_params, bc, epsilon, pop_size=10, generations=5000,
             max_runtime_s=max_runtime_s, seed=solver_seed),
-        "centralized_mppi": lambda: run_centralized_mppi_gaussian_start(
+        "centralized_mppi": lambda: run_centralized_mppi_warm_start(
             sys_params, bc, epsilon,
             n_iter=mppi_iterations, n_samples=mppi_samples,
             sigma=mppi_sigma, lambda_=mppi_lambda, tau_init_std=tau_init_std,
             seed=solver_seed, max_runtime_s=max_runtime_s),
-        "decentralized_mppi": lambda: run_decentralized_mppi_gaussian_start(
+        "decentralized_mppi": lambda: run_decentralized_mppi_warm_start(
             sys_params, bc, epsilon,
             n_iter=mppi_iterations, n_samples=mppi_samples,
             sigma=mppi_sigma, lambda_=mppi_lambda, tau_init_std=tau_init_std,
@@ -279,9 +284,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mppi-samples",    type=int,   default=10)
     p.add_argument("--mppi-sigma",      type=float, default=0.7)
     p.add_argument("--mppi-lambda",     type=float, default=1.0)
-    p.add_argument("--tau-init-std",    type=float, default=1.0,
-                    help="Std dev of the Gaussian cold-start nominal tau, "
-                         "matching run_sensitivity.py's BASELINE tau_init_std")
+    p.add_argument("--tau-init-std",    type=float, default=0.1,
+                    help="Scale of the uniform random tau guess fed to the "
+                         "multiple-shooting warm start (make_nominal_tau). "
+                         "0.1 matches the GA population init (pop_gen_new).")
     p.add_argument("--mppi-seed-fallback", type=int, default=42,
                     help="Used only if a scenario has no stored 'seed' field "
                          "(older scenario files generated without --seed)")

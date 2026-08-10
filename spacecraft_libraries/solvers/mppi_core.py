@@ -50,6 +50,7 @@ def make_nominal_tau(
     bc: BoundaryConditions,
     epsilon: float,
     rng: np.random.Generator,
+    tau_init_scale: float = 1e-1,
 ) -> np.ndarray:
     """Generate a nominal tau via the same multiple-shooting routine the GA uses.
 
@@ -69,7 +70,7 @@ def make_nominal_tau(
     try:
         np.random.seed(seed)
         tau_opt, _ = genetic_code.multiple_shooting_optimization_new(
-            bc, N, dt_casadi, I_casadi, epsilon_casadi
+            bc, N, dt_casadi, I_casadi, epsilon_casadi, tau_init_scale=tau_init_scale
         )
     finally:
         np.random.set_state(state)

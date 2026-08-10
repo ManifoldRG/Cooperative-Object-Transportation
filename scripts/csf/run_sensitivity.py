@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """MPPI hyperparameter sensitivity study — OAT (one-at-a-time) design.
 
-Baseline: sigma=0.25, tau=1.0, lambda=1.0, n_iter=10, n_samples=10
+Baseline: sigma=0.25, tau=0.1, lambda=1.0, n_iter=10, n_samples=10
 Sweeps one parameter at a time across 5 values, per scenario, per method.
+
+Nominal tau comes from the multiple-shooting warm start (make_nominal_tau) —
+the same initialization family the GA population uses — NOT a Gaussian cold
+start. tau_init_std is the scale of the uniform random tau guess fed to the
+shooting IPOPT (GA default 1e-1).
 
 Total tasks = n_scenarios x 4 params x 5 values x 2 methods
             = 5 scenarios x 20 x 2 = 200  (for a 5-scenario scenarios.json)
@@ -30,16 +35,18 @@ from spacecraft_libraries.data_structures import (
     BoundaryConditions, SystemParams, StateVectorLie,
 )
 from spacecraft_libraries.evaluation.metrics import terminal_violation, lie_attitude_violation
-from spacecraft_libraries.solvers.mppi_core import run_mppi
+from spacecraft_libraries.solvers.mppi_core import make_nominal_tau, run_mppi
 from spacecraft_libraries import new_opts
 
 # ── Baseline ──────────────────────────────────────────────────────────────────
-BASELINE = dict(sigma=0.25, lambda_=1.0, tau_init_std=1.0, n_iter=10, n_samples=10)
+BASELINE = dict(sigma=0.25, lambda_=1.0, tau_init_std=0.1, n_iter=10, n_samples=10)
 
 # ── OAT sweeps ────────────────────────────────────────────────────────────────
 SWEEPS = [
     ("sigma",    [("sigma",      v) for v in [0.1, 0.25, 0.5, 0.75, 1.0]]),
-    ("tau",      [("tau_init_std", v) for v in [0.1, 0.5, 1.0, 2.0, 5.0]]),
+    # log-spaced: 1e-3 ~ island-collapse regime, 0.1 = GA-matched default,
+    # 5.0 ~ noise-dominated shooting init
+    ("tau",      [("tau_init_std", v) for v in [0.001, 0.01, 0.1, 1.0, 5.0]]),
     ("lambda_",  [("lambda_",    v) for v in [0.5, 0.8, 0.9, 1.0, 1.5]]),
     ("gamma",    [("gamma",      v) for v in
                   [(5,10), (10,10), (10,5), (20,10), (10,20)]]),
@@ -136,7 +143,8 @@ def _run_decentralized(sys_params, bc, epsilon, rng, cfg):
     island_costs, island_taus, island_histories = [], [], []
     for i in range(num_agents):
         island_rng = np.random.default_rng(rng.integers(0, 2**31 - 1))
-        nominal = island_rng.normal(0.0, cfg["tau_init_std"], size=(N, 3))
+        nominal = make_nominal_tau(sys_params, bc, epsilon, island_rng,
+                                   tau_init_scale=cfg["tau_init_std"])
         best_tau, best_cost, history = run_mppi(
             sys_params, bc, epsilon, nominal,
             n_iter=cfg["n_iter"], n_samples=cfg["n_samples"],
@@ -216,7 +224,8 @@ def main():
     ))
 
     try:
-        nominal = rng.normal(0.0, combo["tau_init_std"], size=(N, 3))
+        nominal = make_nominal_tau(sys_params, bc, epsilon, rng,
+                                   tau_init_scale=combo["tau_init_std"])
         if combo["method"] == "centralized_mppi":
             traj, cost, rt, mppi_info = _run_centralized(
                 sys_params, bc, epsilon, nominal, rng, combo)
