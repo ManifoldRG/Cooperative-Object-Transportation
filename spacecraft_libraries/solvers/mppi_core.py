@@ -159,6 +159,8 @@ def run_mppi(
     noise_mode: str = "white",
     noise_knots: int = 8,
     oracle=None,
+    selection: str = "softmin",
+    step_size: float = 1.0,
 ) -> tuple[np.ndarray, float, MPPIHistory]:
     """Run the MPPI loop and return (best_tau, best_cost, history).
 
@@ -233,6 +235,21 @@ def run_mppi(
         if not finite_mask.any():
             continue
 
+        if selection == "greedy":
+            # Greedy Sampler: move the nominal toward the batch-best
+            # PROJECTED sample — the lambda->0 limit of the softmin, made
+            # exact (no exponential underflow). step_size=1 jumps fully onto
+            # the best sample (pure hill-climbing with uphill drift as free
+            # exploration); step_size<1 relaxes toward it (damped walk). The
+            # move happens even if the batch best is worse than the current
+            # nominal; best-so-far tracking keeps the returned solution
+            # monotone.
+            k_best = int(np.argmin(np.where(finite_mask, costs, np.inf)))
+            if projected[k_best] is not None:
+                target = np.asarray(projected[k_best])
+                nominal = nominal + step_size * (target - nominal)
+            continue
+
         J_min = costs[finite_mask].min()
         # Numerically stable softmin weights; zero weight on +inf samples.
         weights = np.zeros(n_samples)
@@ -241,8 +258,18 @@ def run_mppi(
         if w_sum <= 0 or not np.isfinite(w_sum):
             continue
 
-        # Weighted update on the perturbations (path-integral form).
-        update = np.einsum("k,kij->ij", weights / w_sum, eps_samples)
-        nominal = nominal + update
+        # Weighted update over the PROJECTED samples. The costs are measured
+        # at the projections, so the center update must live in the same set:
+        # averaging RAW perturbations would move the sampling center off the
+        # feasible manifold and decouple it from the costs that justified the
+        # move (center/score mismatch, worst at large steps). At one-hot
+        # weights (small lambda) this is exactly a greedy jump to the
+        # projected winner.
+        w = weights / w_sum
+        target = np.zeros_like(nominal)
+        for k in range(n_samples):
+            if w[k] > 0 and projected[k] is not None:
+                target = target + w[k] * np.asarray(projected[k])
+        nominal = nominal + step_size * (target - nominal)
 
     return best_tau, best_cost, history

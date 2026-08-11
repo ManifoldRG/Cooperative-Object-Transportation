@@ -66,6 +66,8 @@ def solve_centralized_gd(
     max_runtime_s: float | None = None,
     restarts: bool = True,
     max_restarts: int | None = None,
+    initial_tau=None,
+    restart_perturb_rel: float = 0.0,
 ):
     """Multi-start projected gradient descent.
 
@@ -79,6 +81,15 @@ def solve_centralized_gd(
     rel_step: first trial step moves tau by ~rel_step * RMS(tau) along the
     normalized gradient (relative scaling, cf. relative sigma).
     restarts=False reproduces the single-start behavior.
+
+    initial_tau: start the FIRST descent from this tau instead of a shooting
+    nominal (enables replanning warm starts and basin probes).
+    restart_perturb_rel: if > 0, restarts 2+ start from best_tau + Gaussian
+    noise of std (restart_perturb_rel * RMS(best_tau)) instead of a fresh
+    shooting nominal. NOTE: fresh shooting nominals are DETERMINISTIC in
+    outcome (the shooting IPOPT converges to the same tau regardless of its
+    random init — measured 2026-08-11), so without this perturbation restarts
+    re-run the identical descent and explore nothing.
     """
     rng = np.random.default_rng(seed)
     start = time.perf_counter()
@@ -91,11 +102,14 @@ def solve_centralized_gd(
     history = {'n_inner': 0, 'n_proj': 0, 'grad_norm': [], 'restart_J': [],
                'restart_iters': []}
 
-    def _descend():
-        """One start: fresh nominal -> project -> descend to stationarity.
-        Returns (tau, J, x_sol, iters) — J=inf if the start failed."""
-        nominal = make_nominal_tau(sys_params, bc, epsilon, rng,
-                                   tau_init_scale=tau_init_scale)
+    def _descend(start_tau=None):
+        """One start: nominal (or given tau) -> project -> descend to
+        stationarity. Returns (tau, J, x_sol, iters) — J=inf if failed."""
+        if start_tau is not None:
+            nominal = np.asarray(start_tau, dtype=float).reshape(sys_params.N, 3)
+        else:
+            nominal = make_nominal_tau(sys_params, bc, epsilon, rng,
+                                       tau_init_scale=tau_init_scale)
         tau, _ = oracle.project(nominal)
         history['n_proj'] += 1
         if tau is None:
@@ -142,7 +156,14 @@ def solve_centralized_gd(
     best_tau, best_J, best_x = None, float('inf'), None
     n_starts = 0
     while time_left() and (max_restarts is None or n_starts < max_restarts):
-        tau_s, J_s, x_s, iters_s = _descend()
+        if n_starts == 0:
+            start_tau = initial_tau
+        elif restart_perturb_rel > 0 and best_tau is not None:
+            scale = restart_perturb_rel * max(float(np.sqrt(np.mean(best_tau ** 2))), 1e-9)
+            start_tau = best_tau + rng.normal(0.0, scale, best_tau.shape)
+        else:
+            start_tau = None  # fresh shooting nominal (deterministic outcome)
+        tau_s, J_s, x_s, iters_s = _descend(start_tau)
         n_starts += 1
         history['restart_J'].append(float(J_s))
         history['restart_iters'].append(iters_s)
