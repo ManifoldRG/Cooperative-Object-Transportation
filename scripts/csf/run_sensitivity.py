@@ -9,6 +9,12 @@ the same initialization family the GA population uses — NOT a Gaussian cold
 start. tau_init_std is the scale of the uniform random tau guess fed to the
 shooting IPOPT (GA default 1e-1).
 
+With --time-limit T, runs are DEADLINE-DRIVEN like baseline_comparison.py:
+n_iter is effectively unbounded and run_mppi stops at the wall clock (per-
+island slices of T each for decentralized). The gamma sweep's n_iter values
+are inert in this mode; its n_samples values still set the batch size.
+Without --time-limit, behavior is the original untimed n_iter-driven loop.
+
 Total tasks = n_scenarios x 4 params x 5 values x 2 methods
             = 5 scenarios x 20 x 2 = 200  (for a 5-scenario scenarios.json)
 
@@ -39,11 +45,19 @@ from spacecraft_libraries.solvers.mppi_core import make_nominal_tau, run_mppi
 from spacecraft_libraries import new_opts
 
 # ── Baseline ──────────────────────────────────────────────────────────────────
-BASELINE = dict(sigma=0.25, lambda_=1.0, tau_init_std=0.1, n_iter=10, n_samples=10)
+# sigma=0.1 confirmed optimal on the warm-start protocol (local 5-point probe
+# at 300s, 2026-08-10: 0.7 never improves the nominal, 0.01 is sub-noise-floor,
+# 0.1 beats 0.05 and 0.25).
+BASELINE = dict(sigma=0.1, lambda_=1.0, tau_init_std=0.1, n_iter=10, n_samples=10)
 
 # ── OAT sweeps ────────────────────────────────────────────────────────────────
 SWEEPS = [
-    ("sigma",    [("sigma",      v) for v in [0.1, 0.25, 0.5, 0.75, 1.0]]),
+    # RELATIVE sigma (fraction of warm-start nominal RMS torque; see
+    # run_mppi(relative_sigma=True)). Log grid spans both observed regimes:
+    # polishing (sigma_opt/RMS ~ 0.02, tight warm starts) and escaping
+    # (~0.7, loose warm starts). Absolute-sigma sweeps proved scenario-
+    # dependent and unrecommendable (2026-08-10/11 local + CSF runs).
+    ("sigma",    [("sigma",      v) for v in [0.01, 0.03, 0.1, 0.3, 1.0]]),
     # log-spaced: 1e-3 ~ island-collapse regime, 0.1 = GA-matched default,
     # 5.0 ~ noise-dominated shooting init
     ("tau",      [("tau_init_std", v) for v in [0.001, 0.01, 0.1, 1.0, 5.0]]),
@@ -56,10 +70,14 @@ METHODS = ["centralized_mppi", "decentralized_mppi"]
 
 FIELDNAMES = [
     "scenario_id", "method", "varied_param",
-    "sigma", "lambda_", "n_iter", "n_samples", "tau_init_std",
+    "sigma", "sigma_mode", "lambda_", "n_iter", "n_samples", "tau_init_std",
+    "time_limit_s",
     "cost", "terminal_violation", "runtime_s",
     "failed_sample_fraction", "n_iter_completed",
 ]
+
+# n_iter used when --time-limit makes the loop deadline-driven
+DEADLINE_ITERS = 1_000_000
 
 
 def build_combos(scenarios):
@@ -111,12 +129,16 @@ def _violation(traj, bc):
     )
 
 
-def _run_centralized(sys_params, bc, epsilon, nominal, rng, cfg):
+def _run_centralized(sys_params, bc, epsilon, nominal, rng, cfg, time_limit_s=None,
+                     relative_sigma=True):
     t0 = time.perf_counter()
+    n_iter = cfg["n_iter"] if time_limit_s is None else DEADLINE_ITERS
     best_tau, best_cost, history = run_mppi(
         sys_params, bc, epsilon, nominal,
-        n_iter=cfg["n_iter"], n_samples=cfg["n_samples"],
+        n_iter=n_iter, n_samples=cfg["n_samples"],
         sigma=cfg["sigma"], lambda_=cfg["lambda_"], rng=rng,
+        deadline_s=time_limit_s, start_time=t0,
+        relative_sigma=relative_sigma,
     )
     traj, _, _, cost = new_opts.opt_given_tau_ipopt_new(
         best_tau, sys_params.N, epsilon, sys_params, bc, num_iter=1000
@@ -124,7 +146,8 @@ def _run_centralized(sys_params, bc, epsilon, nominal, rng, cfg):
     return traj, float(cost), time.perf_counter() - t0, history.as_dict()
 
 
-def _run_decentralized(sys_params, bc, epsilon, rng, cfg):
+def _run_decentralized(sys_params, bc, epsilon, rng, cfg, time_limit_s=None,
+                       relative_sigma=True):
     from scipy.spatial.distance import cdist
     import networkx as nx
 
@@ -145,10 +168,16 @@ def _run_decentralized(sys_params, bc, epsilon, rng, cfg):
         island_rng = np.random.default_rng(rng.integers(0, 2**31 - 1))
         nominal = make_nominal_tau(sys_params, bc, epsilon, island_rng,
                                    tau_init_scale=cfg["tau_init_std"])
+        # Deadline mode: per-island slice, absolute deadline (i+1)*T from t0
+        # (mirrors baseline_comparison.run_decentralized_mppi_warm_start).
+        n_iter = cfg["n_iter"] if time_limit_s is None else DEADLINE_ITERS
+        island_deadline = None if time_limit_s is None else (i + 1) * time_limit_s
         best_tau, best_cost, history = run_mppi(
             sys_params, bc, epsilon, nominal,
-            n_iter=cfg["n_iter"], n_samples=cfg["n_samples"],
+            n_iter=n_iter, n_samples=cfg["n_samples"],
             sigma=cfg["sigma"], lambda_=cfg["lambda_"], rng=island_rng,
+            deadline_s=island_deadline, start_time=t0,
+            relative_sigma=relative_sigma,
         )
         island_taus.append(best_tau)
         island_costs.append(best_cost)
@@ -185,6 +214,15 @@ def parse_args():
     p.add_argument("--task-id",    type=int,  required=True)
     p.add_argument("--scenarios",  type=Path, required=True)
     p.add_argument("--output-dir", type=Path, default=Path("results/tasks"))
+    p.add_argument("--time-limit", type=float, default=None,
+                   help="Wall-clock budget in seconds; makes runs deadline-"
+                        "driven like baseline_comparison.py (per-island for "
+                        "decentralized). Omit for the original untimed loop.")
+    p.add_argument("--sigma-mode", choices=["absolute", "relative"], default="relative",
+                   help="'relative' (default): sigma is a fraction of the warm-"
+                        "start nominal's RMS torque — the sigma sweep grid is "
+                        "designed for this mode. 'absolute': legacy raw torque "
+                        "units.")
     return p.parse_args()
 
 
@@ -221,17 +259,22 @@ def main():
         sigma=combo["sigma"], lambda_=combo["lambda_"],
         n_iter=combo["n_iter"], n_samples=combo["n_samples"],
         tau_init_std=combo["tau_init_std"],
+        time_limit_s=args.time_limit if args.time_limit is not None else "",
+        sigma_mode=args.sigma_mode,
     ))
 
+    relative = args.sigma_mode == "relative"
     try:
         nominal = make_nominal_tau(sys_params, bc, epsilon, rng,
                                    tau_init_scale=combo["tau_init_std"])
         if combo["method"] == "centralized_mppi":
             traj, cost, rt, mppi_info = _run_centralized(
-                sys_params, bc, epsilon, nominal, rng, combo)
+                sys_params, bc, epsilon, nominal, rng, combo,
+                time_limit_s=args.time_limit, relative_sigma=relative)
         else:
             traj, cost, rt, mppi_info = _run_decentralized(
-                sys_params, bc, epsilon, rng, combo)
+                sys_params, bc, epsilon, rng, combo,
+                time_limit_s=args.time_limit, relative_sigma=relative)
 
         row["cost"]               = cost
         row["runtime_s"]          = rt

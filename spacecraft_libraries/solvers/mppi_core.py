@@ -29,6 +29,7 @@ class MPPIHistory:
     best_cost_per_iter: list = field(default_factory=list)
     failed_samples: int = 0
     total_samples: int = 0
+    sigma_abs: float | None = None  # effective absolute sigma actually sampled with
 
     @property
     def failed_sample_fraction(self) -> float:
@@ -42,6 +43,7 @@ class MPPIHistory:
             "n_samples_per_iter": self.n_samples_per_iter,
             "best_cost_per_iter": list(self.best_cost_per_iter),
             "failed_sample_fraction": self.failed_sample_fraction,
+            "sigma_abs": self.sigma_abs,
         }
 
 
@@ -118,11 +120,20 @@ def run_mppi(
     rng: np.random.Generator,
     deadline_s: Optional[float] = None,
     start_time: Optional[float] = None,
+    relative_sigma: bool = False,
+    sigma_floor: float = 1e-6,
 ) -> tuple[np.ndarray, float, MPPIHistory]:
     """Run the MPPI loop and return (best_tau, best_cost, history).
 
     `best_tau` is the lowest-cost projected tau ever sampled (NOT just the final
     nominal), so we never regress below the best seen sample.
+
+    With `relative_sigma=True`, `sigma` is interpreted as a fraction of the
+    warm-start nominal's RMS torque: sigma_abs = sigma * max(RMS(nominal),
+    sigma_floor). The right absolute perturbation scale is scenario-dependent
+    (torque magnitudes vary orders of magnitude across masses/inertias/
+    horizons), so a relative sigma transfers across scenarios where an
+    absolute one cannot. The effective value is recorded in history.sigma_abs.
     """
     N = sys_params.N
     nominal = np.asarray(nominal_tau, dtype=float).reshape(N, 3).copy()
@@ -144,11 +155,19 @@ def run_mppi(
     if start_time is None:
         start_time = time.perf_counter()
 
+    # Resolve the effective sampling std AFTER the nominal projection, so a
+    # relative sigma is anchored to the feasible warm-start torque scale.
+    sigma_eff = sigma
+    if relative_sigma:
+        rms = float(np.sqrt(np.mean(np.square(nominal))))
+        sigma_eff = sigma * max(rms, sigma_floor)
+    history.sigma_abs = sigma_eff
+
     for it in range(n_iter):
         if deadline_s is not None and (time.perf_counter() - start_time) >= deadline_s:
             break
 
-        eps_samples = rng.normal(0.0, sigma, size=(n_samples, N, 3))
+        eps_samples = rng.normal(0.0, sigma_eff, size=(n_samples, N, 3))
         costs = np.full(n_samples, np.inf)
         projected = [None] * n_samples
 

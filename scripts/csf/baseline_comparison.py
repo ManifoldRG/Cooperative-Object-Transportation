@@ -43,10 +43,15 @@ METHODS = [
 MPPI_METHODS = {"centralized_mppi", "decentralized_mppi"}
 
 TIME_LIMITS = [60.0, 300.0, 600.0, 1200.0]
-MPPI_SCHEDULE = {
-    300.0:  (24, 12),
-    600.0:  (35, 17),
-    1200.0: (49, 24),
+# MPPI is deadline-driven: n_iter is set effectively unbounded and run_mppi's
+# deadline_s check terminates at the wall clock, so MPPI consumes the same
+# compute budget as the GA (which runs generations until its deadline).
+# The schedule only sets the per-iteration sample batch size.
+MPPI_DEADLINE_ITERS = 1_000_000
+MPPI_SAMPLE_SCHEDULE = {
+    300.0:  12,
+    600.0:  17,
+    1200.0: 24,
 }
 
 FIELDNAMES = [
@@ -54,6 +59,7 @@ FIELDNAMES = [
     "cost", "terminal_violation", "runtime_s",
     "n_agents", "a", "e", "m", "tf", "epsilon_tol",
     "solver_seed", "tau_init_std",  # solver_seed: GA + both MPPI. tau_init_std: MPPI only.
+    "mppi_sigma", "sigma_mode",     # MPPI only; sigma_mode: absolute | relative
 ]
 
 SEEDED_METHODS = {"centralized_ga"} | MPPI_METHODS
@@ -106,7 +112,7 @@ def _warm_nominal(sys_params, bc, epsilon, rng: np.random.Generator,
 
 def run_centralized_mppi_warm_start(sys_params, bc, epsilon, n_iter, n_samples,
                                     sigma, lambda_, tau_init_std, seed,
-                                    max_runtime_s):
+                                    max_runtime_s, relative_sigma=False):
     rng = np.random.default_rng(seed)
     start = time.perf_counter()
     N = sys_params.N
@@ -121,6 +127,7 @@ def run_centralized_mppi_warm_start(sys_params, bc, epsilon, n_iter, n_samples,
         rng=rng,
         deadline_s=max_runtime_s,
         start_time=start,
+        relative_sigma=relative_sigma,
     )
 
     traj, ctrl, q, cost = new_opts.opt_given_tau_ipopt_new(
@@ -143,7 +150,7 @@ def run_centralized_mppi_warm_start(sys_params, bc, epsilon, n_iter, n_samples,
 def run_decentralized_mppi_warm_start(sys_params, bc, epsilon, n_iter, n_samples,
                                       sigma, lambda_, tau_init_std, base_seed,
                                       max_runtime_s, line_of_sight_limit=100.0,
-                                      graph_degree=None):
+                                      graph_degree=None, relative_sigma=False):
     attach_vecs = np.asarray(sys_params.rs)
     num_agents = attach_vecs.shape[0]
     graph = _build_line_of_sight_graph_with_degree(attach_vecs, line_of_sight_limit, graph_degree)
@@ -160,14 +167,21 @@ def run_decentralized_mppi_warm_start(sys_params, bc, epsilon, n_iter, n_samples
             break
         rng = np.random.default_rng(base_seed + i)
         nominal = _warm_nominal(sys_params, bc, epsilon, rng, tau_init_std)
+        # Each island gets its own slice of the serial budget (absolute
+        # deadline (i+1)*max_runtime_s from start). With deadline-driven
+        # n_iter this is what enforces per-agent budget parity with the
+        # centralized run — a shared deadline would let island 0 consume
+        # the entire 6x budget and starve the rest.
+        island_deadline = None if max_runtime_s is None else (i + 1) * max_runtime_s
         best_tau, best_cost, history = run_mppi(
             sys_params, bc, epsilon,
             nominal_tau=nominal,
             n_iter=n_iter, n_samples=n_samples,
             sigma=sigma, lambda_=lambda_,
             rng=rng,
-            deadline_s=effective_limit,
+            deadline_s=island_deadline,
             start_time=start,
+            relative_sigma=relative_sigma,
         )
         island_taus[i] = best_tau
         island_costs[i] = best_cost
@@ -210,7 +224,9 @@ def run_decentralized_mppi_warm_start(sys_params, bc, epsilon, n_iter, n_samples
 
 def run_centralized_ga_seeded(sys_params, bc, epsilon, pop_size, generations,
                                max_runtime_s, seed):
-    np.random.seed(seed)
+    # np.random.seed requires < 2**32; derive_solver_seed values exceed it
+    # (scenario timestamp seeds * 10007 ~ 1.8e13), so reduce mod 2**32.
+    np.random.seed(seed % (2**32))
     return solve_centralized_ga(sys_params, bc, epsilon, pop_size=pop_size,
                                  generations=generations, max_runtime_s=max_runtime_s)
 
@@ -227,7 +243,8 @@ def _extract_terminal_state(result: dict, method: str) -> dict:
 def run_one_solver(method: str, sys_params, bc, epsilon, max_runtime_s: float,
                     mppi_iterations: int, mppi_samples: int,
                     mppi_sigma: float, mppi_lambda: float,
-                    tau_init_std: float, solver_seed: int) -> dict:
+                    tau_init_std: float, solver_seed: int,
+                    relative_sigma: bool = False) -> dict:
     solvers = {
         "centralized_nlp": lambda: solve_centralized_nlp(
             sys_params, bc, max_iters=3000, max_runtime_s=max_runtime_s),
@@ -240,12 +257,14 @@ def run_one_solver(method: str, sys_params, bc, epsilon, max_runtime_s: float,
             sys_params, bc, epsilon,
             n_iter=mppi_iterations, n_samples=mppi_samples,
             sigma=mppi_sigma, lambda_=mppi_lambda, tau_init_std=tau_init_std,
-            seed=solver_seed, max_runtime_s=max_runtime_s),
+            seed=solver_seed, max_runtime_s=max_runtime_s,
+            relative_sigma=relative_sigma),
         "decentralized_mppi": lambda: run_decentralized_mppi_warm_start(
             sys_params, bc, epsilon,
             n_iter=mppi_iterations, n_samples=mppi_samples,
             sigma=mppi_sigma, lambda_=mppi_lambda, tau_init_std=tau_init_std,
-            base_seed=solver_seed, max_runtime_s=max_runtime_s),
+            base_seed=solver_seed, max_runtime_s=max_runtime_s,
+            relative_sigma=relative_sigma),
     }
 
     try:
@@ -282,7 +301,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output-dir", type=Path, default=Path("results/tasks"))
     p.add_argument("--mppi-iterations", type=int,   default=20)
     p.add_argument("--mppi-samples",    type=int,   default=10)
-    p.add_argument("--mppi-sigma",      type=float, default=0.7)
+    p.add_argument("--mppi-sigma",      type=float, default=0.1)
+    p.add_argument("--sigma-mode", choices=["absolute", "relative"], default="absolute",
+                    help="'relative': --mppi-sigma is a fraction of the warm-"
+                         "start nominal's RMS torque (transfers across scenario "
+                         "scales); 'absolute': raw torque units (legacy).")
     p.add_argument("--mppi-lambda",     type=float, default=1.0)
     p.add_argument("--tau-init-std",    type=float, default=0.1,
                     help="Scale of the uniform random tau guess fed to the "
@@ -320,9 +343,8 @@ def main() -> None:
         f"tf={bc.tf:.1f}s  agents={len(sys_params.rs)}  eps={epsilon:.2e}"
     )
 
-    mppi_iterations, mppi_samples = MPPI_SCHEDULE.get(
-        combo["time_limit"], (args.mppi_iterations, args.mppi_samples)
-    )
+    mppi_iterations = MPPI_DEADLINE_ITERS
+    mppi_samples = MPPI_SAMPLE_SCHEDULE.get(combo["time_limit"], args.mppi_samples)
     solver_seed = derive_solver_seed(combo["scenario"], combo["time_limit"], args.mppi_seed_fallback)
     is_mppi = combo["method"] in MPPI_METHODS
     if combo["method"] in SEEDED_METHODS:
@@ -338,6 +360,7 @@ def main() -> None:
         mppi_lambda=args.mppi_lambda,
         tau_init_std=args.tau_init_std,
         solver_seed=solver_seed,
+        relative_sigma=(args.sigma_mode == "relative"),
     )
 
     is_seeded = combo["method"] in SEEDED_METHODS
@@ -353,6 +376,8 @@ def main() -> None:
         "epsilon_tol":  epsilon,
         "solver_seed":  solver_seed if is_seeded else "",
         "tau_init_std": args.tau_init_std if is_mppi else "",
+        "mppi_sigma":   args.mppi_sigma if is_mppi else "",
+        "sigma_mode":   args.sigma_mode if is_mppi else "",
         **result,
     }
 
