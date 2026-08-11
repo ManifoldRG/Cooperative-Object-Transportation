@@ -99,10 +99,16 @@ def solve_decentralized_mppi(
     line_of_sight_limit: float = 100.0,
     graph_degree: int | None = None,
     max_runtime_s: float | None = None,
+    use_oracle: bool = True,
 ):
     attach_vecs = np.asarray(sys_params.rs)
     num_agents = attach_vecs.shape[0]
     graph = _build_line_of_sight_graph_with_degree(attach_vecs, line_of_sight_limit, graph_degree)
+
+    oracle = None
+    if use_oracle:
+        from .parametric_oracle import ScenarioOracle
+        oracle = ScenarioOracle(sys_params, bc, epsilon)
 
     start = time.perf_counter()
     # Mirror the GA's runtime-budget convention: scale by num_agents to model
@@ -130,6 +136,7 @@ def solve_decentralized_mppi(
             rng=rng,
             deadline_s=effective_limit,
             start_time=start,
+            oracle=oracle,
         )
         island_taus[i] = best_tau
         island_costs[i] = best_cost

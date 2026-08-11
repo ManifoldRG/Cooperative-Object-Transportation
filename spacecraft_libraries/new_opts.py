@@ -281,7 +281,7 @@ def tau_proj_nonlin_new(tau_hist, N, epsilon, sys_params: SystemParams, bc: Boun
     # get status to determine if the solver succeeded
     status = solver.stats().get("return_status", "unknown")
     if status not in {"Solve_Succeeded", "Solved_To_Acceptable_Level"} and allow_raising_error:
-       return None, _
+       return None, None
 
     w_opt = sol['x'].full().flatten()
     tau_opt = w_opt[:num_steps * 3].reshape(num_steps, 3)

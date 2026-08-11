@@ -18,9 +18,23 @@ def solve_centralized_ga(
     max_runtime_s: float | None = None,
     attitude: str = "so3",
     timing_stats: dict | None = None,
+    use_oracle: bool = True,
 ):
+    # Parametric oracle: build-once projector + inner solver (SO(3) path only;
+    # quat/poly2 keep the legacy per-call construction). Method-neutral speedup
+    # shared with MPPI and gradient descent for fair equal-compute comparisons.
+    oracle = None
+    inner_adapter = None
+    if use_oracle and attitude == "so3":
+        from .parametric_oracle import ScenarioOracle
+        oracle = ScenarioOracle(sys_params, bc, epsilon)
+
+        def inner_adapter(tau):
+            ok, cost, _, _ = oracle.inner_cost(tau)
+            return cost if ok else float("inf")
+
     if attitude == "so3":
-        projector = new_opts.tau_proj_nonlin_new
+        projector = oracle.proj_compat if oracle is not None else new_opts.tau_proj_nonlin_new
     elif attitude == "quat":
         projector = new_opts.tau_proj_nonlin_quat_new
     elif attitude == "so3_poly2":
@@ -41,6 +55,7 @@ def solve_centralized_ga(
             solution_idx,
             projector=projector,
             timing_stats=timing_stats,
+            inner=inner_adapter,
         )
 
     init_pop = genetic_code.pop_gen_new(bc, sys_params, sys_params.N, epsilon, pop_size)

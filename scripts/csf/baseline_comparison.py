@@ -28,6 +28,7 @@ from spacecraft_libraries.evaluation.metrics import lie_attitude_violation, term
 from spacecraft_libraries.solvers.centralized_nlp import solve_centralized_nlp, solve_centralized_nlp_warm
 from spacecraft_libraries.solvers.centralized_ga import solve_centralized_ga
 from spacecraft_libraries.solvers.mppi_core import make_nominal_tau, run_mppi
+from spacecraft_libraries.solvers.parametric_oracle import ScenarioOracle
 from spacecraft_libraries.solvers.decentralized_mppi import (
     _build_line_of_sight_graph_with_degree, _max_consensus,
 )
@@ -60,6 +61,8 @@ FIELDNAMES = [
     "n_agents", "a", "e", "m", "tf", "epsilon_tol",
     "solver_seed", "tau_init_std",  # solver_seed: GA + both MPPI. tau_init_std: MPPI only.
     "mppi_sigma", "sigma_mode",     # MPPI only; sigma_mode: absolute | relative
+    "noise_mode",                   # MPPI only: white | smooth (temporally correlated)
+    "noise_knots",                  # MPPI only, meaningful when noise_mode=smooth
 ]
 
 SEEDED_METHODS = {"centralized_ga"} | MPPI_METHODS
@@ -112,11 +115,13 @@ def _warm_nominal(sys_params, bc, epsilon, rng: np.random.Generator,
 
 def run_centralized_mppi_warm_start(sys_params, bc, epsilon, n_iter, n_samples,
                                     sigma, lambda_, tau_init_std, seed,
-                                    max_runtime_s, relative_sigma=False):
+                                    max_runtime_s, relative_sigma=False,
+                                    noise_mode="white", noise_knots=8):
     rng = np.random.default_rng(seed)
     start = time.perf_counter()
     N = sys_params.N
 
+    oracle = ScenarioOracle(sys_params, bc, epsilon)
     nominal = _warm_nominal(sys_params, bc, epsilon, rng, tau_init_std)
 
     best_tau, best_cost, history = run_mppi(
@@ -128,6 +133,9 @@ def run_centralized_mppi_warm_start(sys_params, bc, epsilon, n_iter, n_samples,
         deadline_s=max_runtime_s,
         start_time=start,
         relative_sigma=relative_sigma,
+        noise_mode=noise_mode,
+        noise_knots=noise_knots,
+        oracle=oracle,
     )
 
     traj, ctrl, q, cost = new_opts.opt_given_tau_ipopt_new(
@@ -150,11 +158,13 @@ def run_centralized_mppi_warm_start(sys_params, bc, epsilon, n_iter, n_samples,
 def run_decentralized_mppi_warm_start(sys_params, bc, epsilon, n_iter, n_samples,
                                       sigma, lambda_, tau_init_std, base_seed,
                                       max_runtime_s, line_of_sight_limit=100.0,
-                                      graph_degree=None, relative_sigma=False):
+                                      graph_degree=None, relative_sigma=False,
+                                      noise_mode="white", noise_knots=8):
     attach_vecs = np.asarray(sys_params.rs)
     num_agents = attach_vecs.shape[0]
     graph = _build_line_of_sight_graph_with_degree(attach_vecs, line_of_sight_limit, graph_degree)
 
+    oracle = ScenarioOracle(sys_params, bc, epsilon)
     start = time.perf_counter()
     effective_limit = None if max_runtime_s is None else max_runtime_s * num_agents
 
@@ -182,6 +192,9 @@ def run_decentralized_mppi_warm_start(sys_params, bc, epsilon, n_iter, n_samples
             deadline_s=island_deadline,
             start_time=start,
             relative_sigma=relative_sigma,
+            noise_mode=noise_mode,
+            noise_knots=noise_knots,
+            oracle=oracle,
         )
         island_taus[i] = best_tau
         island_costs[i] = best_cost
@@ -244,7 +257,9 @@ def run_one_solver(method: str, sys_params, bc, epsilon, max_runtime_s: float,
                     mppi_iterations: int, mppi_samples: int,
                     mppi_sigma: float, mppi_lambda: float,
                     tau_init_std: float, solver_seed: int,
-                    relative_sigma: bool = False) -> dict:
+                    relative_sigma: bool = False,
+                    noise_mode: str = "white",
+                    noise_knots: int = 8) -> dict:
     solvers = {
         "centralized_nlp": lambda: solve_centralized_nlp(
             sys_params, bc, max_iters=3000, max_runtime_s=max_runtime_s),
@@ -258,13 +273,15 @@ def run_one_solver(method: str, sys_params, bc, epsilon, max_runtime_s: float,
             n_iter=mppi_iterations, n_samples=mppi_samples,
             sigma=mppi_sigma, lambda_=mppi_lambda, tau_init_std=tau_init_std,
             seed=solver_seed, max_runtime_s=max_runtime_s,
-            relative_sigma=relative_sigma),
+            relative_sigma=relative_sigma, noise_mode=noise_mode,
+            noise_knots=noise_knots),
         "decentralized_mppi": lambda: run_decentralized_mppi_warm_start(
             sys_params, bc, epsilon,
             n_iter=mppi_iterations, n_samples=mppi_samples,
             sigma=mppi_sigma, lambda_=mppi_lambda, tau_init_std=tau_init_std,
             base_seed=solver_seed, max_runtime_s=max_runtime_s,
-            relative_sigma=relative_sigma),
+            relative_sigma=relative_sigma, noise_mode=noise_mode,
+            noise_knots=noise_knots),
     }
 
     try:
@@ -300,12 +317,28 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--scenarios",  type=Path, required=True)
     p.add_argument("--output-dir", type=Path, default=Path("results/tasks"))
     p.add_argument("--mppi-iterations", type=int,   default=20)
-    p.add_argument("--mppi-samples",    type=int,   default=10)
-    p.add_argument("--mppi-sigma",      type=float, default=0.1)
-    p.add_argument("--sigma-mode", choices=["absolute", "relative"], default="absolute",
+    p.add_argument("--mppi-samples",    type=int,   default=None,
+                    help="Batch size per MPPI iteration. Default: the "
+                         "per-budget MPPI_SAMPLE_SCHEDULE; pass explicitly "
+                         "to override the schedule.")
+    p.add_argument("--mppi-sigma",      type=float, default=0.03,
+                    help="Relative mode (default): fraction of warm-start "
+                         "nominal RMS torque. 0.03 won the 2026-08-11 "
+                         "relative-sigma sweep (best or near-best on 4/5 "
+                         "scenarios, minimax regret).")
+    p.add_argument("--sigma-mode", choices=["absolute", "relative"], default="relative",
                     help="'relative': --mppi-sigma is a fraction of the warm-"
                          "start nominal's RMS torque (transfers across scenario "
                          "scales); 'absolute': raw torque units (legacy).")
+    p.add_argument("--noise-mode", choices=["white", "smooth"], default="white",
+                    help="'smooth': temporally correlated MPPI perturbations "
+                         "(Gaussian knots linearly interpolated across the "
+                         "horizon) — low-dimensional smooth torque moves. "
+                         "'white': independent per-timestep noise (legacy).")
+    p.add_argument("--noise-knots", type=int, default=8,
+                    help="Knot count for --noise-mode smooth: interpolation "
+                         "anchors per axis. Few = smoother/lower-dim moves; "
+                         "= N recovers white noise.")
     p.add_argument("--mppi-lambda",     type=float, default=1.0)
     p.add_argument("--tau-init-std",    type=float, default=0.1,
                     help="Scale of the uniform random tau guess fed to the "
@@ -344,7 +377,10 @@ def main() -> None:
     )
 
     mppi_iterations = MPPI_DEADLINE_ITERS
-    mppi_samples = MPPI_SAMPLE_SCHEDULE.get(combo["time_limit"], args.mppi_samples)
+    if args.mppi_samples is not None:
+        mppi_samples = args.mppi_samples
+    else:
+        mppi_samples = MPPI_SAMPLE_SCHEDULE.get(combo["time_limit"], 10)
     solver_seed = derive_solver_seed(combo["scenario"], combo["time_limit"], args.mppi_seed_fallback)
     is_mppi = combo["method"] in MPPI_METHODS
     if combo["method"] in SEEDED_METHODS:
@@ -361,6 +397,8 @@ def main() -> None:
         tau_init_std=args.tau_init_std,
         solver_seed=solver_seed,
         relative_sigma=(args.sigma_mode == "relative"),
+        noise_mode=args.noise_mode,
+        noise_knots=args.noise_knots,
     )
 
     is_seeded = combo["method"] in SEEDED_METHODS
@@ -378,6 +416,8 @@ def main() -> None:
         "tau_init_std": args.tau_init_std if is_mppi else "",
         "mppi_sigma":   args.mppi_sigma if is_mppi else "",
         "sigma_mode":   args.sigma_mode if is_mppi else "",
+        "noise_mode":   args.noise_mode if is_mppi else "",
+        "noise_knots":  args.noise_knots if is_mppi else "",
         **result,
     }
 

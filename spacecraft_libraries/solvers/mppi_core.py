@@ -85,11 +85,17 @@ def evaluate_tau(
     sys_params: SystemParams,
     bc: BoundaryConditions,
     epsilon: float,
+    oracle=None,
 ) -> tuple[np.ndarray, float]:
     """Project tau onto the rotational manifold, then solve the inner thrust
     allocation IPOPT to score it. Returns (projected_tau, cost). Cost is
     +inf on any failure.
+
+    With `oracle` (a parametric_oracle.ScenarioOracle) the build-once
+    parametric solvers are used — same problems, ~5-7x faster per call.
     """
+    if oracle is not None:
+        return oracle.evaluate(tau)
     N = sys_params.N
     try:
         tau_proj = new_opts.tau_proj_nonlin_new(tau, N, epsilon, sys_params, bc, allow_raising_error=True )[0]
@@ -107,6 +113,34 @@ def evaluate_tau(
         return np.asarray(tau, dtype=float).reshape(N, 3), float("inf")
 
 
+def _sample_smooth_noise(
+    rng: np.random.Generator,
+    n_samples: int,
+    N: int,
+    sigma: float,
+    knots: int,
+) -> np.ndarray:
+    """Temporally correlated perturbations: Gaussian values at `knots` evenly
+    spaced timesteps per axis, linearly interpolated across the N-step horizon.
+
+    Why: white per-timestep noise makes every sample a ~(N*3)-dimensional
+    isotropic kick, whose probability of improving a near-optimal nominal
+    collapses with dimension (observed: hundreds of consecutive rejected
+    samples). Smooth noise restricts samples to a ~(knots*3)-dimensional
+    subspace of slowly varying torque adjustments — the moves the dynamics
+    actually respond to coherently. Marginal std at the knots equals sigma;
+    between knots it is slightly lower (linear interpolation).
+    """
+    t_knots = np.linspace(0.0, N - 1.0, knots)
+    t = np.arange(N, dtype=float)
+    vals = rng.normal(0.0, sigma, size=(n_samples, knots, 3))
+    out = np.empty((n_samples, N, 3))
+    for k in range(n_samples):
+        for ax in range(3):
+            out[k, :, ax] = np.interp(t, t_knots, vals[k, :, ax])
+    return out
+
+
 def run_mppi(
     sys_params: SystemParams,
     bc: BoundaryConditions,
@@ -122,6 +156,9 @@ def run_mppi(
     start_time: Optional[float] = None,
     relative_sigma: bool = False,
     sigma_floor: float = 1e-6,
+    noise_mode: str = "white",
+    noise_knots: int = 8,
+    oracle=None,
 ) -> tuple[np.ndarray, float, MPPIHistory]:
     """Run the MPPI loop and return (best_tau, best_cost, history).
 
@@ -143,7 +180,7 @@ def run_mppi(
     best_cost = float("inf")
 
     # Score the nominal first so we never return worse than starting point.
-    nominal_proj, nominal_cost = evaluate_tau(nominal, sys_params, bc, epsilon)
+    nominal_proj, nominal_cost = evaluate_tau(nominal, sys_params, bc, epsilon, oracle=oracle)
     history.total_samples += 1
     if not np.isfinite(nominal_cost):
         history.failed_samples += 1
@@ -167,7 +204,11 @@ def run_mppi(
         if deadline_s is not None and (time.perf_counter() - start_time) >= deadline_s:
             break
 
-        eps_samples = rng.normal(0.0, sigma_eff, size=(n_samples, N, 3))
+        if noise_mode == "smooth":
+            eps_samples = _sample_smooth_noise(rng, n_samples, N, sigma_eff,
+                                               min(noise_knots, N))
+        else:
+            eps_samples = rng.normal(0.0, sigma_eff, size=(n_samples, N, 3))
         costs = np.full(n_samples, np.inf)
         projected = [None] * n_samples
 
@@ -175,7 +216,7 @@ def run_mppi(
             if deadline_s is not None and (time.perf_counter() - start_time) >= deadline_s:
                 break
             tau_k = nominal + eps_samples[k]
-            tau_k_proj, J_k = evaluate_tau(tau_k, sys_params, bc, epsilon)
+            tau_k_proj, J_k = evaluate_tau(tau_k, sys_params, bc, epsilon, oracle=oracle)
             history.total_samples += 1
             if not np.isfinite(J_k):
                 history.failed_samples += 1

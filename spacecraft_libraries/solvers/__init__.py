@@ -3,6 +3,8 @@ from .centralized_ga import solve_centralized_ga
 from .decentralized_island_ga import solve_decentralized_island_ga
 from .centralized_mppi import solve_centralized_mppi
 from .decentralized_mppi import solve_decentralized_mppi
+from .gradient_descent import solve_centralized_gd, solve_decentralized_gd
+from .parametric_oracle import ScenarioOracle
 
 __all__ = [
     "solve_centralized_nlp",
@@ -10,4 +12,7 @@ __all__ = [
     "solve_decentralized_island_ga",
     "solve_centralized_mppi",
     "solve_decentralized_mppi",
+    "solve_centralized_gd",
+    "solve_decentralized_gd",
+    "ScenarioOracle",
 ]

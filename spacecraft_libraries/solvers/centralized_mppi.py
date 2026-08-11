@@ -19,9 +19,15 @@ def solve_centralized_mppi(
     lambda_: float = 1.0,
     seed: int = 42,
     max_runtime_s: float | None = None,
+    use_oracle: bool = True,
 ):
     rng = np.random.default_rng(seed)
     start = time.perf_counter()
+
+    oracle = None
+    if use_oracle:
+        from .parametric_oracle import ScenarioOracle
+        oracle = ScenarioOracle(sys_params, bc, epsilon)
 
     nominal = make_nominal_tau(sys_params, bc, epsilon, rng)
 
@@ -37,6 +43,7 @@ def solve_centralized_mppi(
         rng=rng,
         deadline_s=max_runtime_s,
         start_time=start,
+        oracle=oracle,
     )
 
     traj, ctrl, q, cost = new_opts.opt_given_tau_ipopt_new(

@@ -48,7 +48,7 @@ from spacecraft_libraries import new_opts
 # sigma=0.1 confirmed optimal on the warm-start protocol (local 5-point probe
 # at 300s, 2026-08-10: 0.7 never improves the nominal, 0.01 is sub-noise-floor,
 # 0.1 beats 0.05 and 0.25).
-BASELINE = dict(sigma=0.1, lambda_=1.0, tau_init_std=0.1, n_iter=10, n_samples=10)
+BASELINE = dict(sigma=0.03, lambda_=1.0, tau_init_std=0.1, n_iter=10, n_samples=10)
 
 # ── OAT sweeps ────────────────────────────────────────────────────────────────
 SWEEPS = [
