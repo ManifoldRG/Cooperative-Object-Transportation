@@ -15,10 +15,12 @@ SCRATCH=/mnt/iusers01/eee01/r83771rr/scratch
 # trusting the sweep.
 
 # Number of Monte Carlo scenarios to generate. Same 20 scenarios are reused
-# across all 4 time limits (60/300/600/1200s) and all 5 methods.
-N_SCENARIOS=20
+# across all 4 time limits (60/300/600/1200s) and all 9 methods (cold NLP,
+# warm NLP, GA, centralized/decentralized GS, centralized/decentralized GD,
+# centralized/decentralized MPPI).
+N_SCENARIOS=10
 
-N_METHODS=5
+N_METHODS=9
 N_TIME_LIMITS=4
 N_TASKS=$((N_SCENARIOS * N_METHODS * N_TIME_LIMITS))
 

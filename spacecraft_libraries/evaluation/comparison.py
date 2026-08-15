@@ -150,7 +150,7 @@ def sample_inertia_tensor(m: float, L: float, max_tries: int = 10000, rng: rando
 
 def random_scenario_generator(fixed_agents_num: int = -1, 
                               seed: int | None = 42, 
-                              thrust_angle: float = np.pi / 2.0):
+                              thrust_angle: float = np.pi / 72.0):
     """
         Params:
         - a : semi-major axis - 1.1 - 1.3

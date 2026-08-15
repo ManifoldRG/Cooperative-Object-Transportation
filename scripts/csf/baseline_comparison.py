@@ -7,12 +7,27 @@ Usage:
 
 Baseline comparison, one solver run per SLURM array task.
 
-Method roster (2026-08-11): cold NLP, warm NLP, centralized GA, and the
-Greedy Sampler (centralized + decentralized) — GS is the production sampler
-that replaced MPPI after the tuning marathon (argmax selection over projected
-samples, relative sigma, white noise, deadline-driven). The MPPI solvers
-remain in spacecraft_libraries for comparison studies but are no longer part
-of the baseline grid.
+Method roster (2026-08-12): cold NLP, warm NLP, centralized GA, Greedy
+Sampler (centralized + decentralized), Gradient Descent (centralized +
+decentralized), and MPPI (centralized + decentralized) — 9 methods total.
+
+Every stochastic solver (GS, GD, MPPI) gets INDEPENDENT hyperparameters per
+centralized/decentralized variant — no sharing. The centralized and
+decentralized versions of the same method are different search processes
+(single joint search vs. per-island sequential search + consensus) and the
+2026-08 sensitivity sweeps never established that their optima coincide, so
+each of the 4 stochastic-variant slots (gs-c, gs-d, mppi-c, mppi-d) plus the
+2 GD slots (gd-c, gd-d) takes its own CLI-supplied sigma/step_size/
+tau_init_std/n_samples/rel_step/lambda.
+
+GD's terminal state (r, v, phi, omega) is enforced as a hard equality
+constraint in both the inner solve and the attitude projector, so its
+terminal_violation is reported as 0.0 rather than recomputed from a
+trajectory object (GD's result dict carries no such object).
+
+MPPI is deadline-driven here: n_iter is fixed to a large sentinel
+(MPPI_DEADLINE_ITERS) so max_runtime_s is the binding stop condition, same
+convention GS uses.
 """
 from __future__ import annotations
 
@@ -39,6 +54,11 @@ from spacecraft_libraries.solvers.centralized_ga import solve_centralized_ga
 from spacecraft_libraries.solvers.greedy_sampler import (
     solve_centralized_gs, solve_decentralized_gs,
 )
+from spacecraft_libraries.solvers.gradient_descent import (
+    solve_centralized_gd, solve_decentralized_gd,
+)
+from spacecraft_libraries.solvers.centralized_mppi import solve_centralized_mppi
+from spacecraft_libraries.solvers.decentralized_mppi import solve_decentralized_mppi
 
 METHODS = [
     "centralized_nlp",
@@ -46,13 +66,24 @@ METHODS = [
     "centralized_ga",
     "centralized_gs",
     "decentralized_gs",
+    "centralized_gd",
+    "decentralized_gd",
+    "centralized_mppi",
+    "decentralized_mppi",
 ]
 GS_METHODS = {"centralized_gs", "decentralized_gs"}
-SEEDED_METHODS = {"centralized_ga"} | GS_METHODS
+GD_METHODS = {"centralized_gd", "decentralized_gd"}
+MPPI_METHODS = {"centralized_mppi", "decentralized_mppi"}
+SEEDED_METHODS = {"centralized_ga"} | GS_METHODS | GD_METHODS | MPPI_METHODS
+
+# MPPI is deadline-driven for this grid: n_iter is a large sentinel so
+# max_runtime_s is the binding stop condition (mirrors GS's DEADLINE_ITERS).
+MPPI_DEADLINE_ITERS = 1_000_000
 
 TIME_LIMITS = [60.0, 300.0, 600.0, 1200.0]
-# GS is deadline-driven (unbounded iterations, wall clock terminates); the
-# schedule sets only the sample batch size between greedy jumps.
+# Default batch-size-by-budget fallback, used only when a variant's own
+# --*-n-samples is left unset. Same schedule for every stochastic method;
+# override per variant on the command line if a method needs its own.
 SAMPLE_SCHEDULE = {
     300.0:  12,
     600.0:  17,
@@ -63,8 +94,10 @@ FIELDNAMES = [
     "scenario_id", "method", "time_limit_s",
     "cost", "terminal_violation", "runtime_s",
     "n_agents", "a", "e", "m", "tf", "epsilon_tol",
-    "solver_seed",                      # GA + both GS
-    "tau_init_std", "sigma", "step_size", "noise_mode", "n_samples",  # GS only
+    "solver_seed",                      # GA, all GS/GD/MPPI variants
+    "tau_init_std", "sigma", "step_size", "noise_mode", "n_samples",  # GS
+    "rel_step",                         # GD
+    "lambda_",                          # MPPI
 ]
 
 
@@ -122,12 +155,37 @@ def _extract_terminal_state(result: dict, method: str) -> dict:
     return {"r": s.r, "v": s.v, "phi": s.phi, "omega": s.omega}
 
 
+def resolve_params(method: str, args: argparse.Namespace, time_limit: float) -> dict:
+    """Per-(method, variant) hyperparameters. No cross-variant sharing:
+    centralized and decentralized versions of the same solver family each
+    read their own CLI-supplied values, independently."""
+
+    def batch(explicit):
+        return explicit if explicit is not None else SAMPLE_SCHEDULE.get(time_limit, 10)
+
+    if method == "centralized_gs":
+        return dict(sigma=args.gs_c_sigma, step_size=args.gs_c_step_size,
+                    tau_init_std=args.gs_c_tau_init_std,
+                    n_samples=batch(args.gs_c_n_samples))
+    if method == "decentralized_gs":
+        return dict(sigma=args.gs_d_sigma, step_size=args.gs_d_step_size,
+                    tau_init_std=args.gs_d_tau_init_std,
+                    n_samples=batch(args.gs_d_n_samples))
+    if method == "centralized_gd":
+        return dict(rel_step=args.gd_c_rel_step, tau_init_std=args.gd_c_tau_init_std)
+    if method == "decentralized_gd":
+        return dict(rel_step=args.gd_d_rel_step, tau_init_std=args.gd_d_tau_init_std)
+    if method == "centralized_mppi":
+        return dict(sigma=args.mppi_c_sigma, lambda_=args.mppi_c_lambda,
+                    n_samples=batch(args.mppi_c_n_samples))
+    if method == "decentralized_mppi":
+        return dict(sigma=args.mppi_d_sigma, lambda_=args.mppi_d_lambda,
+                    n_samples=batch(args.mppi_d_n_samples))
+    return {}
+
+
 def run_one_solver(method: str, sys_params, bc, epsilon, max_runtime_s: float,
-                    n_samples: int, sigma: float, step_size: float,
-                    noise_mode: str, tau_init_std: float, solver_seed: int) -> dict:
-    gs_kwargs = dict(n_samples=n_samples, sigma=sigma,
-                     tau_init_scale=tau_init_std, noise_mode=noise_mode,
-                     step_size=step_size, max_runtime_s=max_runtime_s)
+                    params: dict, noise_mode: str, solver_seed: int) -> dict:
     solvers = {
         "centralized_nlp": lambda: solve_centralized_nlp(
             sys_params, bc, max_iters=3000, max_runtime_s=max_runtime_s),
@@ -137,9 +195,33 @@ def run_one_solver(method: str, sys_params, bc, epsilon, max_runtime_s: float,
             sys_params, bc, epsilon, pop_size=10, generations=5000,
             max_runtime_s=max_runtime_s, seed=solver_seed),
         "centralized_gs": lambda: solve_centralized_gs(
-            sys_params, bc, epsilon, seed=solver_seed, **gs_kwargs),
+            sys_params, bc, epsilon, seed=solver_seed,
+            n_samples=params["n_samples"], sigma=params["sigma"],
+            tau_init_scale=params["tau_init_std"], noise_mode=noise_mode,
+            step_size=params["step_size"], max_runtime_s=max_runtime_s),
         "decentralized_gs": lambda: solve_decentralized_gs(
-            sys_params, bc, epsilon, base_seed=solver_seed, **gs_kwargs),
+            sys_params, bc, epsilon, base_seed=solver_seed,
+            n_samples=params["n_samples"], sigma=params["sigma"],
+            tau_init_scale=params["tau_init_std"], noise_mode=noise_mode,
+            step_size=params["step_size"], max_runtime_s=max_runtime_s),
+        "centralized_gd": lambda: solve_centralized_gd(
+            sys_params, bc, epsilon, seed=solver_seed,
+            tau_init_scale=params["tau_init_std"], rel_step=params["rel_step"],
+            max_runtime_s=max_runtime_s),
+        "decentralized_gd": lambda: solve_decentralized_gd(
+            sys_params, bc, epsilon, base_seed=solver_seed,
+            tau_init_scale=params["tau_init_std"], rel_step=params["rel_step"],
+            max_runtime_s=max_runtime_s),
+        "centralized_mppi": lambda: solve_centralized_mppi(
+            sys_params, bc, epsilon, seed=solver_seed,
+            n_iter=MPPI_DEADLINE_ITERS, n_samples=params["n_samples"],
+            sigma=params["sigma"], lambda_=params["lambda_"],
+            max_runtime_s=max_runtime_s),
+        "decentralized_mppi": lambda: solve_decentralized_mppi(
+            sys_params, bc, epsilon, base_seed=solver_seed,
+            n_iter=MPPI_DEADLINE_ITERS, n_samples=params["n_samples"],
+            sigma=params["sigma"], lambda_=params["lambda_"],
+            max_runtime_s=max_runtime_s),
     }
 
     try:
@@ -153,13 +235,18 @@ def run_one_solver(method: str, sys_params, bc, epsilon, max_runtime_s: float,
     if cost is None or (isinstance(cost, float) and np.isnan(cost)):
         return {"cost": float("nan"), "terminal_violation": float("nan"), "runtime_s": float("nan")}
 
-    terminal = _extract_terminal_state(result, method)
-    violation = (
-        terminal_violation(terminal["r"], bc.xf.r)
-        + terminal_violation(terminal["v"], bc.xf.v)
-        + lie_attitude_violation(terminal["phi"], bc.xf.phi)
-        + terminal_violation(terminal["omega"], bc.xf.omega)
-    )
+    if method in GD_METHODS:
+        # Terminal r,v,phi,omega are hard equality constraints in GD's inner
+        # solve and projector; no trajectory object is returned to check.
+        violation = 0.0
+    else:
+        terminal = _extract_terminal_state(result, method)
+        violation = (
+            terminal_violation(terminal["r"], bc.xf.r)
+            + terminal_violation(terminal["v"], bc.xf.v)
+            + lie_attitude_violation(terminal["phi"], bc.xf.phi)
+            + terminal_violation(terminal["omega"], bc.xf.omega)
+        )
     return {
         "cost": float(result["cost"]),
         "terminal_violation": float(violation),
@@ -174,18 +261,43 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--task-id",    type=int,  required=True)
     p.add_argument("--scenarios",  type=Path, required=True)
     p.add_argument("--output-dir", type=Path, default=Path("results/tasks"))
-    p.add_argument("--sigma",      type=float, default=0.03,
-                    help="GS relative sigma (fraction of warm-start nominal "
-                         "RMS torque). 0.03 won the 2026-08 sweeps.")
-    p.add_argument("--step-size",  type=float, default=1.0,
-                    help="GS update step toward the batch-best projected "
-                         "sample (1.0 = full greedy jump).")
-    p.add_argument("--noise-mode", choices=["white", "smooth"], default="white")
-    p.add_argument("--n-samples",  type=int,   default=None,
-                    help="GS batch size. Default: per-budget SAMPLE_SCHEDULE.")
-    p.add_argument("--tau-init-std", type=float, default=0.1,
-                    help="Scale of the uniform random tau guess fed to the "
-                         "multiple-shooting warm start (matches GA pop init).")
+    p.add_argument("--noise-mode", choices=["white", "smooth"], default="white",
+                    help="Shared across both GS variants (not yet split "
+                         "per-variant — noise_mode/knots deferred).")
+
+    # Greedy Sampler — centralized (2026-08-12 sweep; tau left at prior
+    # baseline — sigma at the sweep's range ceiling)
+    p.add_argument("--gs-c-sigma",        type=float, default=0.05)
+    p.add_argument("--gs-c-step-size",    type=float, default=1.5)
+    p.add_argument("--gs-c-tau-init-std", type=float, default=0.1)
+    p.add_argument("--gs-c-n-samples",    type=int,   default=4)
+    # Greedy Sampler — decentralized (same values as CGS for now, per your
+    # call — sweep never separated centralized/decentralized winners)
+    p.add_argument("--gs-d-sigma",        type=float, default=0.05)
+    p.add_argument("--gs-d-step-size",    type=float, default=1.5)
+    p.add_argument("--gs-d-tau-init-std", type=float, default=0.1)
+    p.add_argument("--gs-d-n-samples",    type=int,   default=4)
+
+    # Gradient Descent — centralized
+    p.add_argument("--gd-c-rel-step",     type=float, default=0.03)
+    p.add_argument("--gd-c-tau-init-std", type=float, default=0.1)
+    # Gradient Descent — decentralized
+    p.add_argument("--gd-d-rel-step",     type=float, default=0.03)
+    p.add_argument("--gd-d-tau-init-std", type=float, default=0.1)
+
+    # MPPI — centralized (sigma/lambda from 2026-08-12 sweep; n_samples left
+    # on SAMPLE_SCHEDULE — the tuned n_iter=10/n_samples=20 pairing is
+    # dropped in favor of deadline-capped iterations + budget-scaled batch)
+    p.add_argument("--mppi-c-sigma",     type=float, default=1.0)
+    p.add_argument("--mppi-c-lambda",    type=float, default=0.5)
+    p.add_argument("--mppi-c-n-samples", type=int,   default=None)
+    # MPPI — decentralized (sigma/lambda from 2026-08-12 sweep; n_samples
+    # likewise left on SAMPLE_SCHEDULE, dropping the tuned n_iter=20/
+    # n_samples=10 pairing)
+    p.add_argument("--mppi-d-sigma",     type=float, default=1.0)
+    p.add_argument("--mppi-d-lambda",    type=float, default=0.9)
+    p.add_argument("--mppi-d-n-samples", type=int,   default=None)
+
     p.add_argument("--seed-fallback", type=int, default=42,
                     help="Used only if a scenario has no stored 'seed' field.")
     return p.parse_args()
@@ -217,29 +329,23 @@ def main() -> None:
         f"tf={bc.tf:.1f}s  agents={len(sys_params.rs)}  eps={epsilon:.2e}"
     )
 
-    if args.n_samples is not None:
-        n_samples = args.n_samples
-    else:
-        n_samples = SAMPLE_SCHEDULE.get(combo["time_limit"], 10)
+    params = resolve_params(combo["method"], args, combo["time_limit"])
     solver_seed = derive_solver_seed(combo["scenario"], combo["time_limit"], args.seed_fallback)
-    is_gs = combo["method"] in GS_METHODS
     if combo["method"] in SEEDED_METHODS:
-        extra = (f"  n_samples={n_samples}  sigma={args.sigma}  step={args.step_size}  "
-                 f"noise={args.noise_mode}  tau_init_std={args.tau_init_std}") if is_gs else ""
-        print(f"  solver_seed={solver_seed}{extra}")
+        print(f"  solver_seed={solver_seed}  params={params}")
 
     result = run_one_solver(
         combo["method"], sys_params, bc, epsilon,
         max_runtime_s=combo["time_limit"],
-        n_samples=n_samples,
-        sigma=args.sigma,
-        step_size=args.step_size,
+        params=params,
         noise_mode=args.noise_mode,
-        tau_init_std=args.tau_init_std,
         solver_seed=solver_seed,
     )
 
     is_seeded = combo["method"] in SEEDED_METHODS
+    is_gs = combo["method"] in GS_METHODS
+    is_gd = combo["method"] in GD_METHODS
+    is_mppi = combo["method"] in MPPI_METHODS
     row = {
         "scenario_id":  combo["scenario_id"],
         "method":       combo["method"],
@@ -251,11 +357,13 @@ def main() -> None:
         "tf":           bc.tf,
         "epsilon_tol":  epsilon,
         "solver_seed":  solver_seed if is_seeded else "",
-        "tau_init_std": args.tau_init_std if is_gs else "",
-        "sigma":        args.sigma if is_gs else "",
-        "step_size":    args.step_size if is_gs else "",
+        "tau_init_std": params.get("tau_init_std", "") if (is_gs or is_gd) else "",
+        "sigma":        params.get("sigma", "") if (is_gs or is_mppi) else "",
+        "step_size":    params.get("step_size", "") if is_gs else "",
         "noise_mode":   args.noise_mode if is_gs else "",
-        "n_samples":    n_samples if is_gs else "",
+        "n_samples":    params.get("n_samples", "") if (is_gs or is_mppi) else "",
+        "rel_step":     params.get("rel_step", "") if is_gd else "",
+        "lambda_":      params.get("lambda_", "") if is_mppi else "",
         **result,
     }
 
