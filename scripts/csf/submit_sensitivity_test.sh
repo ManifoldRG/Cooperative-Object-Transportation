@@ -26,7 +26,7 @@ export PYTHONPATH=${REPO}:$PYTHONPATH
 mkdir -p ${SCRATCH}/results ${SCRATCH}/logs
 
 python ${REPO}/scripts/csf/generate_scenarios.py \
-    --n 5 \
+    --n 10 \
     --seed ${SEED} \
     --fixed-agents-num 6 \
     --output ${SCENARIO_FILE}
@@ -45,7 +45,7 @@ echo "Submitting 200 tasks..."
 sbatch << JOBEOF
 #!/bin/bash --login
 #SBATCH -p serial
-#SBATCH -t 2:00:00
+#SBATCH -t 7-0
 #SBATCH -n 1
 #SBATCH --mem=4G
 #SBATCH --job-name=run_sensitivity
