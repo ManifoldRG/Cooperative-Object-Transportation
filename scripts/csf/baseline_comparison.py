@@ -34,19 +34,28 @@ from spacecraft_libraries.data_structures import (
     BoundaryConditions, SystemParams, StateVectorLie,
 )
 from spacecraft_libraries.evaluation.metrics import lie_attitude_violation, terminal_violation
-from spacecraft_libraries.solvers.centralized_nlp import solve_centralized_nlp, solve_centralized_nlp_warm
+from spacecraft_libraries.solvers.centralized_nlp_th import solve_centralized_nlp_th
 from spacecraft_libraries.solvers.centralized_ga import solve_centralized_ga
 from spacecraft_libraries.solvers.greedy_sampler import (
     solve_centralized_gs, solve_decentralized_gs,
 )
+from spacecraft_libraries.solvers.mppi_core import make_nominal_tau
+from spacecraft_libraries.solvers.parametric_oracle import ScenarioOracle
 
+# NLP entries use solve_centralized_nlp_th — the joint NLP with the CORRECT
+# reference dynamics (TH + body-frame thrusts). The old og_opts.full_nlp
+# solves different physics (CW translation, Hill-frame thrusts); its costs
+# were never comparable and all pre-2026-08-17 NLP columns are artifacts.
+# "_warm" seeds the thrust variables with the bilevel pipeline's first
+# iterate (inner solve at the projected shooting nominal).
 METHODS = [
-    "centralized_nlp",
-    "centralized_nlp_warm",
+    "centralized_nlp_th",
+    "centralized_nlp_th_warm",
     "centralized_ga",
     "centralized_gs",
     "decentralized_gs",
 ]
+NLP_METHODS = {"centralized_nlp_th", "centralized_nlp_th_warm"}
 GS_METHODS = {"centralized_gs", "decentralized_gs"}
 SEEDED_METHODS = {"centralized_ga"} | GS_METHODS
 
@@ -113,8 +122,24 @@ def run_centralized_ga_seeded(sys_params, bc, epsilon, pop_size, generations,
                                  generations=generations, max_runtime_s=max_runtime_s)
 
 
+def _warm_thrust_guess(sys_params, bc, epsilon):
+    """Bilevel first iterate as the joint NLP's thrust guess: inner solve at
+    the projected shooting nominal. ~1-2 s."""
+    oracle = ScenarioOracle(sys_params, bc, epsilon)
+    nominal = make_nominal_tau(sys_params, bc, epsilon,
+                               np.random.default_rng(0), tau_init_scale=0.1)
+    tau_p, _ = oracle.project(nominal)
+    if tau_p is None:
+        return None
+    ok, _, x, _ = oracle.inner_cost(tau_p)
+    if not ok or x is None:
+        return None
+    n_u = len(sys_params.rs) * sys_params.N * 3
+    return x[:n_u]
+
+
 def _extract_terminal_state(result: dict, method: str) -> dict:
-    if method in ("centralized_nlp", "centralized_nlp_warm"):
+    if method in NLP_METHODS:
         x = result["state"]
         return {"r": x[-1, 0:3], "v": x[-1, 3:6], "phi": x[-1, 6:9], "omega": x[-1, 9:12]}
     traj = result["trajectory"]
@@ -129,10 +154,11 @@ def run_one_solver(method: str, sys_params, bc, epsilon, max_runtime_s: float,
                      tau_init_scale=tau_init_std, noise_mode=noise_mode,
                      step_size=step_size, max_runtime_s=max_runtime_s)
     solvers = {
-        "centralized_nlp": lambda: solve_centralized_nlp(
-            sys_params, bc, max_iters=3000, max_runtime_s=max_runtime_s),
-        "centralized_nlp_warm": lambda: solve_centralized_nlp_warm(
-            sys_params, bc, max_iters=3000, max_runtime_s=max_runtime_s),
+        "centralized_nlp_th": lambda: solve_centralized_nlp_th(
+            sys_params, bc, epsilon, max_iters=20000, max_runtime_s=max_runtime_s),
+        "centralized_nlp_th_warm": lambda: solve_centralized_nlp_th(
+            sys_params, bc, epsilon, max_iters=20000, max_runtime_s=max_runtime_s,
+            U_guess=_warm_thrust_guess(sys_params, bc, epsilon)),
         "centralized_ga": lambda: run_centralized_ga_seeded(
             sys_params, bc, epsilon, pop_size=10, generations=5000,
             max_runtime_s=max_runtime_s, seed=solver_seed),

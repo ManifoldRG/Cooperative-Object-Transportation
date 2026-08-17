@@ -162,9 +162,17 @@ def build_inner_parametric(sys_params: SystemParams, bc: BoundaryConditions, eps
     return solver, grad_fn, np.array(lbg, dtype=float), np.array(ubg, dtype=float), x_init, meta
 
 
-def build_projector_parametric(sys_params: SystemParams, bc: BoundaryConditions, epsilon: float):
+def build_projector_parametric(sys_params: SystemParams, bc: BoundaryConditions, epsilon: float,
+                               keep_outs=None):
     """tau_proj_nonlin_new with tau_hist as a parameter. Same constraints,
-    bounds and default initial guess as the legacy function."""
+    bounds and default initial guess as the legacy function.
+
+    keep_outs: optional list of (b_body, s_inertial, theta_min_rad) attitude
+    keep-out cones. For every timestep the body vector b, rotated to the
+    inertial frame, must stay at least theta_min away from direction s:
+    (R_k b) . s <= cos(theta_min). Nonconvex; punctures the feasible attitude
+    path space and creates genuinely distinct routing basins (go left vs
+    right around the forbidden cone)."""
     num_steps = sys_params.N
     dt = bc.tf / num_steps
 
@@ -201,6 +209,14 @@ def build_projector_parametric(sys_params: SystemParams, bc: BoundaryConditions,
         lbg.extend([0] * 6)
         ubg.extend([0] * 6)
 
+        if keep_outs:
+            for b_body, s_inertial, theta_min in keep_outs:
+                b = ca.DM(np.asarray(b_body, dtype=float))
+                s_dir = ca.DM(np.asarray(s_inertial, dtype=float))
+                constraints.append(ca.dot(R_k @ b, s_dir))
+                lbg.append(-ca.inf)
+                ubg.append(float(np.cos(theta_min)))
+
     constraints.append(state[num_steps] - af)
     lbg.extend([0] * 6)
     ubg.extend([0] * 6)
@@ -235,7 +251,8 @@ class ScenarioOracle:
     """
 
     def __init__(self, sys_params: SystemParams, bc: BoundaryConditions, epsilon: float,
-                 inner_max_iter: int = 1000, warm_start_inner: bool = True):
+                 inner_max_iter: int = 1000, warm_start_inner: bool = True,
+                 keep_outs=None):
         self.sys_params = sys_params
         self.bc = bc
         self.epsilon = epsilon
@@ -244,7 +261,8 @@ class ScenarioOracle:
          self._ix0_default, self.meta) = build_inner_parametric(
             sys_params, bc, epsilon, max_iter=inner_max_iter)
         (self._proj, self._plbg, self._pubg, self._plbx, self._pubx,
-         self._px0) = build_projector_parametric(sys_params, bc, epsilon)
+         self._px0) = build_projector_parametric(sys_params, bc, epsilon,
+                                                 keep_outs=keep_outs)
         self._warm = warm_start_inner
         self._last_inner_x = None
 
