@@ -43,7 +43,27 @@ class RecoveryConfig:
     max_recovery_cycles: int = 3
     success_tol: float = 1.5   # terminal violation under which the episode is DONE
 
-    # --- MPPI replanning knobs (forwarded to solve_decentralized_mppi) ---
+    # --- planner selection ---
+    # "dgd" (default): decentralized gradient descent with random island
+    # starts — deterministic replans, machine-zero terminal violations,
+    # basin exploration at tight cones. "dmppi": legacy decentralized MPPI.
+    planner: str = "dgd"
+
+    # --- dGD replanning knobs (forwarded to solve_decentralized_gd) ---
+    # Per-island wall budget. Replans must be timely, so the default caps
+    # each island at 15 s (serial islands: plan wall ~= n_agents * budget);
+    # islands with leftover time random-restart and keep the best. None =
+    # descend to stationarity — can take minutes per island on aggressive
+    # maneuvers (measured 42 s/341 iters on the tiny closed-loop test
+    # scenario), so use None only when plan quality outranks latency.
+    gd_budget_s: float | None = 15.0
+    gd_rel_step: float = 0.03
+    gd_tau_init_scale: float = 0.1
+    gd_random_restart_scale: float = 1.0
+    gd_base_seed: int = 42
+
+    # --- MPPI replanning knobs (forwarded to solve_decentralized_mppi;
+    # used only when planner="dmppi") ---
     mppi_iterations: int = 10
     mppi_samples: int = 5
     mppi_sigma: float = 7e-1

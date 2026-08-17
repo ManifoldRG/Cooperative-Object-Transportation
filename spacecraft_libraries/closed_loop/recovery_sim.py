@@ -16,14 +16,58 @@ import time
 import networkx as nx
 import numpy as np
 
+from .. import new_opts
 from ..data_structures import BoundaryConditions, StateVectorLie, SystemParams
 from ..evaluation.metrics import quaternion_aware_violation, terminal_violation, lie_attitude_violation
 from ..solvers.decentralized_mppi import _build_line_of_sight_graph_with_degree, solve_decentralized_mppi
+from ..solvers.gradient_descent import solve_decentralized_gd
 from .comms import CommsBus
 from .config import RecoveryConfig
 from .controller import AgentController, TRACKING, DETUMBLE, IDENTIFY, DONE, FAILED
 from .faults import FaultModel
 from .simulator import PayloadSimulator
+
+
+def _make_plan(sys_params: SystemParams, bc: BoundaryConditions, epsilon: float,
+               cfg: RecoveryConfig) -> dict:
+    """Planner dispatch. dGD (default): decentralized gradient descent with
+    random island starts; its result carries no trajectory object, so the
+    winning tau is finalized through the legacy inner solve to produce the
+    same (tau, control-with-.U, trajectory) contract dMPPI plans have."""
+    if cfg.planner == "dmppi":
+        return solve_decentralized_mppi(
+            sys_params, bc, epsilon,
+            n_iter=cfg.mppi_iterations, n_samples=cfg.mppi_samples,
+            sigma=cfg.mppi_sigma, lambda_=cfg.mppi_lambda,
+            base_seed=cfg.mppi_base_seed,
+            graph_degree=cfg.graph_degree,
+        )
+    if cfg.planner != "dgd":
+        raise ValueError(f"unknown planner {cfg.planner!r} (use 'dgd' or 'dmppi')")
+
+    res = solve_decentralized_gd(
+        sys_params, bc, epsilon,
+        base_seed=cfg.gd_base_seed,
+        tau_init_scale=cfg.gd_tau_init_scale,
+        rel_step=cfg.gd_rel_step,
+        max_runtime_s=cfg.gd_budget_s,
+        max_restarts_per_island=(None if cfg.gd_budget_s is not None else 1),
+        graph_degree=cfg.graph_degree,
+        random_restart_scale=cfg.gd_random_restart_scale,
+        parallel=False,
+    )
+    traj, ctrl, q, cost = new_opts.opt_given_tau_ipopt_new(
+        res["tau"], sys_params.N, epsilon, sys_params, bc, num_iter=1000)
+    return {
+        "method": "decentralized_gd",
+        "tau": res["tau"],
+        "control": ctrl,
+        "trajectory": traj,
+        "attachment": q,
+        "cost": float(cost),
+        "runtime": res["runtime"],
+        "gd": res["gd"],
+    }
 
 
 def _distribute_plan(plan: dict, controllers: list[AgentController], active_ids: list[int]) -> None:
@@ -57,6 +101,7 @@ def run_recovery_episode(
         return
 
     cfg = cfg or RecoveryConfig()
+    fault_events = list(fault_events or [])
     t_start = time.perf_counter()
     dt = bc.tf / sys_params.N
     num_agents = len(sys_params.rs)
@@ -70,12 +115,7 @@ def run_recovery_episode(
 
     if verbose:
         print(f"[recovery] initial plan: {num_agents} agents, N={sys_params.N}, dt={dt:.3f}")
-    plan = solve_decentralized_mppi(
-        sys_params, bc, epsilon,
-        n_iter=cfg.mppi_iterations, n_samples=cfg.mppi_samples,
-        sigma=cfg.mppi_sigma, lambda_=cfg.mppi_lambda, base_seed=cfg.mppi_base_seed,
-        graph_degree=cfg.graph_degree,
-    )
+    plan = _make_plan(sys_params, bc, epsilon, cfg)
     _distribute_plan(plan, controllers, active_ids)
 
     sim = PayloadSimulator(sys_params, bc.x0, dt)
@@ -181,12 +221,17 @@ def run_recovery_episode(
                         f"  phi   = {replan_state.phi} "
                         f"  omega = {replan_state.omega}"
                     )
-                plan = solve_decentralized_mppi(
-                    sys_reduced, bc_replan, epsilon,
-                    n_iter=cfg.mppi_iterations, n_samples=cfg.mppi_samples,
-                    sigma=cfg.mppi_sigma, lambda_=cfg.mppi_lambda, base_seed=cfg.mppi_base_seed,
-                    graph_degree=cfg.graph_degree
-                )
+                try:
+                    plan = _make_plan(sys_reduced, bc_replan, epsilon, cfg)
+                except Exception as exc:
+                    # Replan genuinely infeasible for the surviving fleet
+                    # (e.g. too few cone-constrained thrusters to span the
+                    # required wrench). Fail the episode honestly instead of
+                    # crashing it — legacy dMPPI silently returned a garbage
+                    # zeros-plan here.
+                    status = "failed_replan_infeasible"
+                    _log(f"REPLAN FAILED: {exc}")
+                    break
                 active_ids = survivors
                 _distribute_plan(plan, controllers, active_ids)
 

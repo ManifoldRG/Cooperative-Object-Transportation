@@ -40,9 +40,12 @@ def _scenario(n_agents=3, N=10, tf=20.0):
 
 
 def _fast_cfg(**kw):
-    base = dict(mppi_iterations=2, mppi_samples=3, rest_v_tol=1e-2, rest_w_tol=1e-2,
+    # agents_comms_delay_step_map replaced the old scalar comms_delay_steps
+    # (per-agent delay map, keys cover the max 5 test agents).
+    base = dict(mppi_iterations=2, mppi_samples=3, gd_budget_s=3.0,
+                rest_v_tol=1e-2, rest_w_tol=1e-2,
                 rest_hold=2, max_detumble_steps=8, dev_tol=0.3, dev_hold=2,
-                comms_delay_steps=2, id_timeout=3)
+                agents_comms_delay_step_map={i: 2 for i in range(5)}, id_timeout=3)
     base.update(kw)
     return RecoveryConfig(**base)
 
@@ -63,8 +66,8 @@ def test_cone_projection_respects_cone_and_cap():
 
 
 def test_healthy_rollout_does_not_trigger_recovery():
-    sys_params, bc, eps = _scenario() #fixme: also
-    result = run_recovery_episode(sys_params, bc, eps, fault_events=None, cfg=_fast_cfg())
+    sys_params, bc, eps = _scenario()
+    result = run_recovery_episode(sys_params, bc, eps, fault_events=[], cfg=_fast_cfg())
     assert result["recovery_cycles"] == 0
     assert result["status"] in ("done", "done_offtarget")
     # No agent should have been removed and no detumble should have fired.
@@ -101,21 +104,26 @@ def test_detumble_reduces_translational_and_angular_motion():
 
 def test_single_actuation_fault_triggers_recovery():
     # Generous horizon so the detumble + identify rounds don't exhaust the clock.
-    sys_params, bc, eps = _scenario(n_agents=3, N=20, tf=40.0)  #fixme: change
+    # 4 agents so the post-fault replan (3 survivors) stays wrench-feasible.
+    # Fault agent 1 (a +z-hemisphere attachment): agent 2 is the fleet's ONLY
+    # -z attachment, and losing it makes braking from an overshoot state
+    # physically infeasible — the dGD planner (correctly) refuses to return
+    # an infeasible plan where legacy dMPPI silently returned garbage.
+    sys_params, bc, eps = _scenario(n_agents=4, N=20, tf=40.0)
     cfg = _fast_cfg()
-    faults = [FaultEvent(agent_id=2, trigger_time=6.0, fault_type="actuation")]
+    faults = [FaultEvent(agent_id=1, trigger_time=6.0, fault_type="actuation")]
     result = run_recovery_episode(sys_params, bc, eps, fault_events=faults, cfg=cfg)
     assert result["recovery_cycles"] >= 1
-    removed = {a for _, agents in result["removed_agents"] for a in agents}
-    assert 2 in removed
-    assert 2 not in result["final_active_agents"]
+    removed = {a for _, _, agents in result["removed_agents"] for a in agents}
+    assert 1 in removed
+    assert 1 not in result["final_active_agents"]
 
 
 def test_comms_dead_agent_marked_unresponsive():
     sys_params, bc, eps = _scenario(n_agents=3, N=20, tf=40.0)
-    cfg = _fast_cfg(comms_delay_steps=2)
+    cfg = _fast_cfg()
     # Agent 1 loses BOTH (dead + silent): must be detected as unresponsive.
     faults = [FaultEvent(agent_id=1, trigger_time=6.0, fault_type="both")]
     result = run_recovery_episode(sys_params, bc, eps, fault_events=faults, cfg=cfg)
-    removed = {a for _, agents in result["removed_agents"] for a in agents}
+    removed = {a for _, _, agents in result["removed_agents"] for a in agents}
     assert 1 in removed

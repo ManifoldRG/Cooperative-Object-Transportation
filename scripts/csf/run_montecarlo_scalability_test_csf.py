@@ -45,6 +45,13 @@ def parse_args():
     p.add_argument("--at-least-n-survivors", type=int, default=4)
     p.add_argument("--fault-model", type=str, choices=("random", "localized"), help="fault_model in {random,localized}", default="random")
     p.add_argument("--fault-type", type=str, choices=("actuation", "comms", "both"), help="fault_type in {actuation,comms,both}", default="actuation")
+    p.add_argument("--planner", type=str, choices=("dgd", "dmppi"), default="dgd",
+                   help="Recovery planner: dGD with random island starts "
+                        "(default) or legacy decentralized MPPI.")
+    p.add_argument("--gd-budget-s", type=float, default=None,
+                   help="Per-island wall budget for dGD (None = one descent "
+                        "to stationarity per island).")
+    p.add_argument("--gd-rel-step", type=float, default=0.03)
     p.add_argument("--mppi-iterations", type=int, default=20)
     p.add_argument("--mppi-samples", type=int, default=10)
     p.add_argument("--mppi-sigma", type=float, default=0.8)
@@ -158,6 +165,8 @@ def main():
     # for writing
     fieldnames = [
         "run_id", "time_limit_s", "method",
+        "status", "recovery_cycles", "removed_agents", "final_active_agents",
+        "replan_feasible",
         "cost", "terminal_violation", "runtime_s", "simtime_s",
         "n_agents", "a", "e", "m", "tf", "epsilon_tol",
         "agent_commdelay", "faults", "scenario",
@@ -166,6 +175,10 @@ def main():
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     cfg = RecoveryConfig(
+        planner=args.planner,
+        gd_budget_s=args.gd_budget_s,
+        gd_rel_step=args.gd_rel_step,
+        gd_base_seed=args.seed,
         mppi_iterations=args.mppi_iterations,
         mppi_samples=args.mppi_samples,
         max_recovery_cycles=args.max_recovery_cycles,
@@ -214,7 +227,17 @@ def main():
 
             row = { "run_id": run_id,
                     "time_limit_s": getattr(args, "time_limit", None),
-                    "method": "MPPI-Recovery",
+                    "method": f"{args.planner.upper()}-Recovery",
+                    # Survivability metrics: status distinguishes success from
+                    # wrench-infeasible replans (fleet lost critical thrust
+                    # authority — attachment-geometry fault envelope).
+                    "status": result["status"],
+                    "recovery_cycles": result["recovery_cycles"],
+                    "removed_agents": ";".join(
+                        f"step={s}:t={t}:agents={list(a)}"
+                        for s, t, a in result["removed_agents"]),
+                    "final_active_agents": ";".join(map(str, result["final_active_agents"])),
+                    "replan_feasible": result["status"] != "failed_replan_infeasible",
                     "cost": result["fuel"],
                     "terminal_violation": result["terminal_violation"],
                     "runtime_s": wall,
