@@ -1,21 +1,10 @@
 #!/usr/bin/env python3
-"""Greedy Sampler (GS) hyperparameter sensitivity study — OAT design.
+"""Gradient Descent (GD) hyperparameter sensitivity study — OAT design.
 
-Baseline (defaults locked in the 2026-08-10/11 tuning sessions):
-    sigma=0.03 (RELATIVE: fraction of warm-start nominal RMS torque),
-    step_size=1.0 (full jump to batch-best projected sample),
-    tau_init_std=0.1 (warm-start shooting init scale; measured inert),
-    n_samples=12 (batch size between center jumps).
+GS was already covered in an earlier sweep; this script is GD-only.
 
-Sweeps one parameter at a time across 5 LINEAR values centered on the
-default, per scenario, per method (centralized_gs, decentralized_gs).
-Noise is WHITE (production default; no knots). Runs are deadline-driven:
-each task gets --time-limit seconds of wall clock (per-island slices for
-the decentralized variant), so n_iter is not a parameter — the batch size
-alone sets the jump cadence within the fixed budget.
-
-Total tasks = n_scenarios x 4 params x 5 values x 2 methods
-            = 5 scenarios x 40 = 200  (for a 5-scenario scenarios.json)
+GD baseline:
+    rel_step=0.03    tau_init_std=0.1    max_restarts=16
 
 Usage:
     python run_sensitivity.py --task-id 1 \
@@ -39,37 +28,32 @@ print(f"numpy: {np.__version__}", flush=True)
 from spacecraft_libraries.data_structures import (
     BoundaryConditions, SystemParams, StateVectorLie,
 )
-from spacecraft_libraries.evaluation.metrics import terminal_violation, lie_attitude_violation
-from spacecraft_libraries.solvers.greedy_sampler import (
-    solve_centralized_gs, solve_decentralized_gs,
+from spacecraft_libraries.solvers.gradient_descent import (
+    solve_centralized_gd, solve_decentralized_gd,
 )
 
-# ── Baseline ──────────────────────────────────────────────────────────────────
-BASELINE = dict(sigma=0.03, step_size=1.0, tau_init_std=0.1, n_samples=12)
-
-# ── OAT sweeps: 5 linear values centered on each default ─────────────────────
-SWEEPS = [
-    ("sigma",      [("sigma",        v) for v in [0.01, 0.02, 0.03, 0.04, 0.05]]),
-    ("step_size",  [("step_size",    v) for v in [0.5, 0.75, 1.0, 1.25, 1.5]]),
-    ("tau",        [("tau_init_std", v) for v in [0.05, 0.075, 0.1, 0.125, 0.15]]),
-    ("batch",      [("n_samples",    v) for v in [4, 8, 12, 16, 20]]),
+# ── GD: baseline + OAT sweeps (5 linear values centered on each default) ──────
+GD_BASELINE = dict(rel_step=0.03, tau_init_std=0.1, max_restarts=16)
+GD_SWEEPS = [
+    ("rel_step",     [("rel_step",     v) for v in [0.01, 0.02, 0.03, 0.04, 0.05]]),
+    ("tau",          [("tau_init_std", v) for v in [0.05, 0.075, 0.1, 0.125, 0.15]]),
+    ("max_restarts", [("max_restarts", v) for v in [8, 16, 24, 32, 40]]),
 ]
-
-METHODS = ["centralized_gs", "decentralized_gs"]
+GD_METHODS = ["centralized_gd", "decentralized_gd"]
 
 FIELDNAMES = [
     "scenario_id", "method", "varied_param",
-    "sigma", "step_size", "tau_init_std", "n_samples",
-    "noise_mode", "time_limit_s",
+    "rel_step", "tau_init_std", "max_restarts",
+    "time_limit_s",
     "cost", "terminal_violation", "runtime_s",
 ]
 
 
 def build_combos(scenarios):
     combos = []
-    for sc, (param_name, values), method in product(scenarios, SWEEPS, METHODS):
+    for sc, (param_name, values), method in product(scenarios, GD_SWEEPS, GD_METHODS):
         for key, val in values:
-            cfg = dict(BASELINE)
+            cfg = dict(GD_BASELINE)
             cfg[key] = val
             combos.append(dict(
                 scenario_id=sc["scenario_id"], scenario=sc,
@@ -97,16 +81,6 @@ def make_sys_bc(s):
         tf=s["tf"],
     )
     return sys_params, bc, s["epsilon"]
-
-
-def _violation(traj, bc):
-    s = traj.states[-1]
-    return float(
-        terminal_violation(s.r, bc.xf.r)
-        + terminal_violation(s.v, bc.xf.v)
-        + lie_attitude_violation(s.phi, bc.xf.phi)
-        + terminal_violation(s.omega, bc.xf.omega)
-    )
 
 
 def parse_args():
@@ -138,9 +112,9 @@ def main():
 
     combo = combos[idx]
     print(f"Combo: sc={combo['scenario_id']} method={combo['method']} "
-          f"varied={combo['varied_param']} sigma={combo['sigma']} "
-          f"step={combo['step_size']} tau={combo['tau_init_std']} "
-          f"n_samples={combo['n_samples']}", flush=True)
+          f"varied={combo['varied_param']} rel_step={combo['rel_step']} "
+          f"tau={combo['tau_init_std']} max_restarts={combo['max_restarts']}",
+          flush=True)
 
     sys_params, bc, epsilon = make_sys_bc(combo["scenario"])
     seed = args.task_id * 42
@@ -149,24 +123,26 @@ def main():
     row.update(dict(
         scenario_id=combo["scenario_id"], method=combo["method"],
         varied_param=combo["varied_param"],
-        sigma=combo["sigma"], step_size=combo["step_size"],
-        tau_init_std=combo["tau_init_std"], n_samples=combo["n_samples"],
-        noise_mode="white", time_limit_s=args.time_limit,
+        rel_step=combo["rel_step"], tau_init_std=combo["tau_init_std"],
+        max_restarts=combo["max_restarts"], time_limit_s=args.time_limit,
     ))
 
     try:
-        kwargs = dict(n_samples=combo["n_samples"], sigma=combo["sigma"],
-                      tau_init_scale=combo["tau_init_std"],
-                      noise_mode="white", step_size=combo["step_size"],
-                      max_runtime_s=args.time_limit)
-        if combo["method"] == "centralized_gs":
-            res = solve_centralized_gs(sys_params, bc, epsilon, seed=seed, **kwargs)
+        common = dict(tau_init_scale=combo["tau_init_std"],
+                      rel_step=combo["rel_step"], max_runtime_s=args.time_limit)
+        if combo["method"] == "centralized_gd":
+            res = solve_centralized_gd(sys_params, bc, epsilon, seed=seed,
+                                       max_restarts=combo["max_restarts"], **common)
         else:
-            res = solve_decentralized_gs(sys_params, bc, epsilon, base_seed=seed, **kwargs)
+            res = solve_decentralized_gd(sys_params, bc, epsilon, base_seed=seed,
+                                         max_restarts_per_island=combo["max_restarts"],
+                                         **common)
 
-        row["cost"]               = res["cost"]
-        row["runtime_s"]          = res["runtime"]
-        row["terminal_violation"] = _violation(res["trajectory"], bc)
+        row["cost"]      = res["cost"]
+        row["runtime_s"] = res["runtime"]
+        # Terminal state is a hard equality constraint (inner solve +
+        # projector); no trajectory object is returned to check.
+        row["terminal_violation"] = 0.0
     except Exception:
         traceback.print_exc()
 

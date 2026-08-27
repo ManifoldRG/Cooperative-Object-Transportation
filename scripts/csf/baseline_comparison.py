@@ -103,7 +103,7 @@ SAMPLE_SCHEDULE = {
 FIELDNAMES = [
     "scenario_id", "method", "time_limit_s",
     "cost", "terminal_violation", "runtime_s",
-    "n_agents", "a", "e", "m", "tf", "epsilon_tol",
+    "n_agents", "a", "e", "m", "tf", "epsilon_tol", "nu",
     "solver_seed",                      # GA, all GS/GD/MPPI variants
     "tau_init_std", "sigma", "step_size", "noise_mode", "n_samples",  # GS
     "rel_step",                         # GD
@@ -378,6 +378,7 @@ def main() -> None:
         "method":       combo["method"],
         "time_limit_s": combo["time_limit"],
         "n_agents":     len(sys_params.rs),
+        "nu": sys_params.nu,
         "a":            sys_params.a,
         "e":            sys_params.e,
         "m":            sys_params.m,

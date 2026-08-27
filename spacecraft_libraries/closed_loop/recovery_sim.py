@@ -20,7 +20,7 @@ from .. import new_opts
 from ..data_structures import BoundaryConditions, StateVectorLie, SystemParams
 from ..evaluation.metrics import quaternion_aware_violation, terminal_violation, lie_attitude_violation
 from ..solvers.decentralized_mppi import _build_line_of_sight_graph_with_degree, solve_decentralized_mppi
-from ..solvers.gradient_descent import solve_decentralized_gd
+from ..solvers.gradient_descent import solve_decentralized_gd, solve_centralized_gd
 from .comms import CommsBus
 from .config import RecoveryConfig
 from .controller import AgentController, TRACKING, DETUMBLE, IDENTIFY, DONE, FAILED
@@ -42,32 +42,56 @@ def _make_plan(sys_params: SystemParams, bc: BoundaryConditions, epsilon: float,
             base_seed=cfg.mppi_base_seed,
             graph_degree=cfg.graph_degree,
         )
+    if cfg.planner == "dgd":
+        res = solve_decentralized_gd(
+            sys_params, bc, epsilon,
+            base_seed=cfg.gd_base_seed,
+            tau_init_scale=cfg.gd_tau_init_scale,
+            rel_step=cfg.gd_rel_step,
+            max_runtime_s=cfg.gd_budget_s,
+            max_restarts_per_island=(None if cfg.gd_budget_s is not None else 1),
+            graph_degree=cfg.graph_degree,
+            random_restart_scale=cfg.gd_random_restart_scale,
+            parallel=False,
+        )
+        traj, ctrl, q, cost = new_opts.opt_given_tau_ipopt_new(
+            res["tau"], sys_params.N, epsilon, sys_params, bc, num_iter=1000)
+        return {
+            "method": "decentralized_gd",
+            "tau": res["tau"],
+            "control": ctrl,
+            "trajectory": traj,
+            "attachment": q,
+            "cost": float(cost),
+            "runtime": res["runtime"],
+            "gd": res["gd"],
+        }
+
+    if cfg.planner == "cgd":
+        res = solve_centralized_gd(
+            sys_params, bc, epsilon,
+            seed=cfg.gd_base_seed,
+            tau_init_scale=cfg.gd_tau_init_scale,
+            rel_step=cfg.gd_rel_step,
+            max_runtime_s=cfg.gd_budget_s,
+            random_restart_scale=cfg.gd_random_restart_scale,
+        )
+        traj, ctrl, q, cost = new_opts.opt_given_tau_ipopt_new(
+            res["tau"], sys_params.N, epsilon, sys_params, bc, num_iter=1000)
+        return {
+            "method": "centralized_gd",
+            "tau": res["tau"],
+            "control": ctrl,
+            "trajectory": traj,
+            "attachment": q,
+            "cost": float(cost),
+            "runtime": res["runtime"],
+            "gd": res["gd"],
+        }
     if cfg.planner != "dgd":
         raise ValueError(f"unknown planner {cfg.planner!r} (use 'dgd' or 'dmppi')")
 
-    res = solve_decentralized_gd(
-        sys_params, bc, epsilon,
-        base_seed=cfg.gd_base_seed,
-        tau_init_scale=cfg.gd_tau_init_scale,
-        rel_step=cfg.gd_rel_step,
-        max_runtime_s=cfg.gd_budget_s,
-        max_restarts_per_island=(None if cfg.gd_budget_s is not None else 1),
-        graph_degree=cfg.graph_degree,
-        random_restart_scale=cfg.gd_random_restart_scale,
-        parallel=False,
-    )
-    traj, ctrl, q, cost = new_opts.opt_given_tau_ipopt_new(
-        res["tau"], sys_params.N, epsilon, sys_params, bc, num_iter=1000)
-    return {
-        "method": "decentralized_gd",
-        "tau": res["tau"],
-        "control": ctrl,
-        "trajectory": traj,
-        "attachment": q,
-        "cost": float(cost),
-        "runtime": res["runtime"],
-        "gd": res["gd"],
-    }
+
 
 
 def _distribute_plan(plan: dict, controllers: list[AgentController], active_ids: list[int]) -> None:

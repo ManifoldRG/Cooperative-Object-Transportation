@@ -1,8 +1,8 @@
-"""CLI driver for the closed-loop fault-recovery simulation.
+"""CLI driver for the closed-loop fault-recovery simulation, decentralized GD.
 
 Examples:
-py run_montecarlo_scalability_test_csf.py --task-id 1 --output-dir here_test --fixed-agents-num 25 --no-fault 
-py run_montecarlo_scalability_test_csf.py --task-id 2 --output-dir here_test --fixed-agents-num 25 --at-least-n-survivors 23 
+py run_montecarlo_scalability_test_csf_gd.py --task-id 1 --output-dir here_test --fixed-agents-num 25 --no-fault
+py run_montecarlo_scalability_test_csf_gd.py --task-id 2 --output-dir here_test --fixed-agents-num 25 --at-least-n-survivors 23
 """
 from pathlib import Path
 import argparse
@@ -36,7 +36,7 @@ def parse_fault(spec: str) -> FaultEvent:
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Run a closed-loop fault-recovery episode.")
+    p = argparse.ArgumentParser(description="Run a closed-loop fault-recovery episode (decentralized GD).")
     p.add_argument("--scenario", type=int, default=4, choices=(1, 2, 3, 4, 5, 6, 7, 9, 10, 13, 19, 20))
     p.add_argument("--fault", type=parse_fault, action="append", default=[],
                    help="Repeatable. Format 'agent_id:trigger_time:fault_type', "
@@ -45,9 +45,13 @@ def parse_args():
     p.add_argument("--at-least-n-survivors", type=int, default=4)
     p.add_argument("--fault-model", type=str, choices=("random", "localized"), help="fault_model in {random,localized}", default="random")
     p.add_argument("--fault-type", type=str, choices=("actuation", "comms", "both"), help="fault_type in {actuation,comms,both}", default="actuation")
-    p.add_argument("--mppi-iterations", type=int, default=20)
-    p.add_argument("--mppi-samples", type=int, default=10)
-    p.add_argument("--mppi-sigma", type=float, default=1.0)
+    # dGD hyperparameters (rel_step, tau_init_scale tuned via baseline_comparison sensitivity results)
+    p.add_argument("--gd-rel-step", type=float, default=0.03)
+    p.add_argument("--gd-tau-init-scale", type=float, default=0.05)
+    p.add_argument("--gd-budget-s", type=float, default=15.0,
+                   help="Per-island wall budget (s). None = descend to stationarity (can take minutes/island).")
+    p.add_argument("--gd-random-restart-scale", type=float, default=1.0)
+    p.add_argument("--gd-base-seed", type=int, default=42)
     p.add_argument("--comms-delay-steps", type=int, default=100)
     p.add_argument("--random-extra-comms-delay-steps", type=int, default=0)
     p.add_argument("--max-recovery-cycles", type=int, default=5)
@@ -153,6 +157,101 @@ def print_all_scenarios_faults_commsmap(all_scenarios: list[tuple[SystemParams, 
             f"{[(aid, delay) for aid, delay in commdelay_map.items()]}"
         )
         print()
+# def main():
+#
+#     # for writing
+#     fieldnames = [
+#         "run_id", "time_limit_s", "method",
+#         "cost", "terminal_violation", "runtime_s", "simtime_s",
+#         "n_agents", "a", "e", "m", "tf", "epsilon_tol",
+#         "agent_commdelay", "faults", "scenario",
+#     ]
+#
+#     args = parse_args()
+#     args.output_dir.mkdir(parents=True, exist_ok=True)
+#     cfg = RecoveryConfig(
+#         planner="dgd",
+#         gd_rel_step=args.gd_rel_step,
+#         gd_tau_init_scale=args.gd_tau_init_scale,
+#         gd_budget_s=args.gd_budget_s,
+#         gd_random_restart_scale=args.gd_random_restart_scale,
+#         gd_base_seed=args.gd_base_seed,
+#         max_recovery_cycles=args.max_recovery_cycles,
+#         graph_degree=args.graph_degree,
+#     )
+#
+#     # get all fault events from random generator
+#     num_of_events = 1
+#     all_scenarios = [ random_scenario_generator(fixed_agents_num=args.fixed_agents_num,
+#                                                 seed=args.seed,
+#                                                 thrust_angle=args.thrust_angle) for i in range(num_of_events)]
+#     if args.no_fault:
+#         all_fault_events = [ [] for i in range(num_of_events)]
+#     else:
+#         all_fault_events = [random_dropout_fault_generator( sys_params,
+#                                                           bc.tf,
+#                                                           num_of_events,
+#                                                           args.fault_model,
+#                                                           args.fault_type,
+#                                                           at_least_n_survivors=args.at_least_n_survivors,
+#                                                           affected_radius=1.0,
+#                                                           trigger_time=0,
+#                                                           rng_seed=args.seed )[0] for (sys_params,bc,_) in all_scenarios]
+#     all_commdelay_maps = [comms_delay_generator(sys_params, "fixed", args.comms_delay_steps, args.random_extra_comms_delay_steps) for (sys_params,_,_) in all_scenarios]
+#
+#     # print out scenarios, faults and communicaiton maps before running
+#     print_all_scenarios_faults_commsmap(all_scenarios, all_fault_events, all_commdelay_maps, cfg)
+#
+#     # start writing file
+#     out = args.output_dir / f"task_{args.task_id:04d}_Nagents_{args.fixed_agents_num}.csv"
+#     with out.open("w", newline="") as f:
+#         writer = csv.DictWriter(f, fieldnames=fieldnames)
+#         writer.writeheader()
+#
+#         # start running all fault events
+#         for run_id, ((sys_params, bc, epsilon), fevent, commdelay_map) in enumerate( zip(all_scenarios, all_fault_events, all_commdelay_maps), start=0):
+#
+#             cfg.agents_comms_delay_step_map = commdelay_map
+#             print(f"[scenario {args.scenario}] " f"agents={len(sys_params.rs)} N={sys_params.N} tf={bc.tf:.2f}" )
+#             print(f"[faults] {[ (f.agent_id, f.trigger_time, f.fault_type) for f in fevent ] or 'none'}")
+#             print(f"[delay] { [(aid, delay) for aid, delay in commdelay_map.items()]}")
+#             t0 = time.perf_counter()
+#             result = run_recovery_episode(sys_params, bc, epsilon, fault_events=fevent, cfg=cfg, verbose=True )
+#             wall = time.perf_counter() - t0
+#
+#             row = { "run_id": run_id,
+#                     "time_limit_s": getattr(args, "time_limit", None),
+#                     "method": "dGD-Recovery",
+#                     "cost": result["fuel"],
+#                     "terminal_violation": result["terminal_violation"],
+#                     "runtime_s": wall,
+#                     "simtime_s": result["sim_time"],
+#                     "n_agents": len(sys_params.rs),
+#                     "a": sys_params.a,
+#                     "e": sys_params.e,
+#                     "m": sys_params.m,
+#                     "tf": bc.tf,
+#                     "epsilon_tol": epsilon,
+#                     "agent_commdelay": ";".join(f"agent={aid}:delay={delay}" for aid, delay in cfg.agents_comms_delay_step_map.items()),
+#                     "faults": format_fault_event_result(fevent, result),
+#                     "scenario": format_scenario(sys_params, bc, epsilon),
+#             }
+#             writer.writerow(row)
+#             f.flush()
+#
+#             print("\n=== Episode summary ===")
+#             print(f"status            : {result['status']}")
+#             print(f"terminal_violation: {result['terminal_violation']:.4e}")
+#             print(f"fuel (sum||u||^2) : {result['fuel']:.4e}")
+#             print(f"recovery_cycles   : {result['recovery_cycles']}")
+#             print(f"removed_agents    : {result['removed_agents']}")
+#             print(f"final_active      : {result['final_active_agents']}")
+#             print(f"sim_time / steps  : {result['sim_time']:.2f}s / {result['steps']}")
+#             print(f"wall              : {wall:.1f}s")
+#
+# if __name__ == "__main__":
+#     main()
+
 def main():
 
     # for writing
@@ -166,12 +265,19 @@ def main():
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     cfg = RecoveryConfig(
-        mppi_iterations=args.mppi_iterations,
-        mppi_samples=args.mppi_samples,
+        planner="dgd",
+        gd_rel_step=args.gd_rel_step,
+        gd_tau_init_scale=args.gd_tau_init_scale,
+        gd_budget_s=args.gd_budget_s,
+        gd_random_restart_scale=args.gd_random_restart_scale,
+        gd_base_seed=args.gd_base_seed,
         max_recovery_cycles=args.max_recovery_cycles,
-        mppi_sigma=args.mppi_sigma,
-        graph_degree=args.graph_degree
+        graph_degree=args.graph_degree,
     )
+
+    # cGD as a baseline against dGD in the open-loop only
+    planners = ["cgd", "dgd"] if args.no_fault else ["dgd"]
+    method_label = {"cgd": "cGD-Recovery", "dgd": "dGD-Recovery"}
 
     # get all fault events from random generator
     num_of_events = 1
@@ -208,39 +314,45 @@ def main():
             print(f"[scenario {args.scenario}] " f"agents={len(sys_params.rs)} N={sys_params.N} tf={bc.tf:.2f}" )
             print(f"[faults] {[ (f.agent_id, f.trigger_time, f.fault_type) for f in fevent ] or 'none'}")
             print(f"[delay] { [(aid, delay) for aid, delay in commdelay_map.items()]}")
-            t0 = time.perf_counter()
-            result = run_recovery_episode(sys_params, bc, epsilon, fault_events=fevent, cfg=cfg, verbose=True )
-            wall = time.perf_counter() - t0
 
-            row = { "run_id": run_id,
-                    "time_limit_s": getattr(args, "time_limit", None),
-                    "method": "MPPI-Recovery",
-                    "cost": result["fuel"],
-                    "terminal_violation": result["terminal_violation"],
-                    "runtime_s": wall,
-                    "simtime_s": result["sim_time"],
-                    "n_agents": len(sys_params.rs),
-                    "a": sys_params.a,
-                    "e": sys_params.e,
-                    "m": sys_params.m,
-                    "tf": bc.tf,
-                    "epsilon_tol": epsilon,
-                    "agent_commdelay": ";".join(f"agent={aid}:delay={delay}" for aid, delay in cfg.agents_comms_delay_step_map.items()),
-                    "faults": format_fault_event_result(fevent, result),
-                    "scenario": format_scenario(sys_params, bc, epsilon),
-            }
-            writer.writerow(row)
-            f.flush()
+            # same MC scenario, run each planner in turn
+            for planner in planners:
+                cfg.planner = planner
+                print(f"[planner] {planner}")
+                t0 = time.perf_counter()
+                result = run_recovery_episode(sys_params, bc, epsilon, fault_events=fevent, cfg=cfg, verbose=True )
+                wall = time.perf_counter() - t0
 
-            print("\n=== Episode summary ===")
-            print(f"status            : {result['status']}")
-            print(f"terminal_violation: {result['terminal_violation']:.4e}")
-            print(f"fuel (sum||u||^2) : {result['fuel']:.4e}")
-            print(f"recovery_cycles   : {result['recovery_cycles']}")
-            print(f"removed_agents    : {result['removed_agents']}")
-            print(f"final_active      : {result['final_active_agents']}")
-            print(f"sim_time / steps  : {result['sim_time']:.2f}s / {result['steps']}")
-            print(f"wall              : {wall:.1f}s")
+                row = { "run_id": run_id,
+                        "time_limit_s": getattr(args, "time_limit", None),
+                        "method": method_label[planner],
+                        "cost": result["fuel"],
+                        "terminal_violation": result["terminal_violation"],
+                        "runtime_s": wall,
+                        "simtime_s": result["sim_time"],
+                        "n_agents": len(sys_params.rs),
+                        "a": sys_params.a,
+                        "e": sys_params.e,
+                        "m": sys_params.m,
+                        "tf": bc.tf,
+                        "epsilon_tol": epsilon,
+                        "agent_commdelay": ";".join(f"agent={aid}:delay={delay}" for aid, delay in cfg.agents_comms_delay_step_map.items()),
+                        "faults": format_fault_event_result(fevent, result),
+                        "scenario": format_scenario(sys_params, bc, epsilon),
+                }
+                writer.writerow(row)
+                f.flush()
+
+                print("\n=== Episode summary ===")
+                print(f"planner           : {planner}")
+                print(f"status            : {result['status']}")
+                print(f"terminal_violation: {result['terminal_violation']:.4e}")
+                print(f"fuel (sum||u||^2) : {result['fuel']:.4e}")
+                print(f"recovery_cycles   : {result['recovery_cycles']}")
+                print(f"removed_agents    : {result['removed_agents']}")
+                print(f"final_active      : {result['final_active_agents']}")
+                print(f"sim_time / steps  : {result['sim_time']:.2f}s / {result['steps']}")
+                print(f"wall              : {wall:.1f}s")
 
 if __name__ == "__main__":
     main()

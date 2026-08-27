@@ -8,17 +8,11 @@
 REPO=/mnt/iusers01/eee01/r83771rr/rev_mrgp/Cooperative-Object-Transportation
 SCRATCH=/mnt/iusers01/eee01/r83771rr/scratch
 
-# decentralized_mppi scales its time_limit internally by num_agents (each
-# agent gets the full per-task time_limit). GA's deadline check is
-# per-generation (centralized_ga.py:70-71), so it can overshoot time_limit
-# by up to one generation's runtime — run the overshoot check before
-# trusting the sweep.
 
-# Number of Monte Carlo scenarios to generate. Same 20 scenarios are reused
-# across all 4 time limits (60/300/600/1200s) and all 9 methods (cold NLP,
-# warm NLP, GA, centralized/decentralized GS, centralized/decentralized GD,
-# centralized/decentralized MPPI).
-N_SCENARIOS=10
+THRUST_ANGLES_DEG=(1 2 2.5 5 15 60)
+N_SCENARIOS_PER_ANGLE=20
+N_ANGLES=${#THRUST_ANGLES_DEG[@]}
+N_SCENARIOS=$((N_SCENARIOS_PER_ANGLE * N_ANGLES))
 
 N_METHODS=9
 N_TIME_LIMITS=4
@@ -30,14 +24,15 @@ OUTPUT_DIR=${SCRATCH}/results/baseline_${TIMESTAMP}
 SCENARIO_FILE=${SCRATCH}/results/baseline_${TIMESTAMP}/scenarios_baseline_${TIMESTAMP}.json
 
 
-echo "Generating ${N_SCENARIOS} scenarios on login node..."
+echo "Generating ${N_SCENARIOS} scenarios on login node (${N_SCENARIOS_PER_ANGLE} per angle x ${N_ANGLES} angles: ${THRUST_ANGLES_DEG[@]} deg)..."
 echo "Base seed: ${SEED}"
 source ${REPO}/.venv/bin/activate
 export PYTHONPATH=${REPO}:$PYTHONPATH
-mkdir -p ${SCRATCH}/results ${SCRATCH}/logs
+mkdir -p ${SCRATCH}/results ${SCRATCH}/logs ${OUTPUT_DIR}
 
 python ${REPO}/scripts/csf/generate_scenarios.py \
-    --n ${N_SCENARIOS} \
+    --n ${N_SCENARIOS_PER_ANGLE} \
+    --thrust-angles-deg ${THRUST_ANGLES_DEG[@]} \
     --seed ${SEED} \
     --fixed-agents-num 6 \
     --output ${SCENARIO_FILE}

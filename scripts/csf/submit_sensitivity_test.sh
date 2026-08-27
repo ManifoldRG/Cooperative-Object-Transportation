@@ -2,13 +2,6 @@
 # ================================================================
 # run_sensitivity.py — OAT hyperparameter sweep, array-per-combo
 #
-# Login node generates 5 scenarios (fixed-agents-num=6), then submits an
-# array of 200 tasks: 5 scenarios x 4 params x 5 values x 2 methods.
-# Each task runs exactly one combo and writes its own task_NNNN.csv.
-#
-# Replaces run_oat_task.py + submit_sensitivity_test.sh — run_sensitivity.py
-# now carries the same BASELINE/SWEEPS/build_combos/--task-id design.
-#
 # Run with: bash submit_run_sensitivity.sh
 # ================================================================
 
@@ -16,17 +9,27 @@ REPO=/mnt/iusers01/eee01/r83771rr/rev_mrgp/Cooperative-Object-Transportation
 SCRATCH=/mnt/iusers01/eee01/r83771rr/scratch
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 SEED=$(date +%s)
-SCENARIO_FILE=${SCRATCH}/results/scenarios_sensitivity_${TIMESTAMP}.json
 OUTPUT_DIR=${SCRATCH}/results/sensitivity_sweep_${TIMESTAMP}
+SCENARIO_FILE=${OUTPUT_DIR}/scenarios_sensitivity_${TIMESTAMP}.json
+
+# Number of Monte Carlo scenarios to generate. GD_SWEEPS in run_sensitivity.py
+# has 3 params x 5 values, crossed with 2 methods (centralized_gd,
+# decentralized_gd) -> 30 combos per scenario. N_TASKS tracks N_SCENARIOS
+# automatically if you change it.
+N_SCENARIOS=20
+N_PARAMS=3
+N_VALUES=5
+N_METHODS=2
+N_TASKS=$((N_SCENARIOS * N_PARAMS * N_VALUES * N_METHODS))
 
 echo "Generating scenarios on login node..."
 echo "Base seed: ${SEED} (scenario i -> seed ${SEED}+i)"
 source ${REPO}/.venv/bin/activate
 export PYTHONPATH=${REPO}:$PYTHONPATH
-mkdir -p ${SCRATCH}/results ${SCRATCH}/logs
+mkdir -p ${SCRATCH}/results ${SCRATCH}/logs ${OUTPUT_DIR}
 
 python ${REPO}/scripts/csf/generate_scenarios.py \
-    --n 10 \
+    --n ${N_SCENARIOS} \
     --seed ${SEED} \
     --fixed-agents-num 6 \
     --output ${SCENARIO_FILE}
@@ -36,11 +39,10 @@ if [ ! -f ${SCENARIO_FILE} ]; then
     exit 1
 fi
 
-mkdir -p ${OUTPUT_DIR}
 echo "Scenarios: ${SCENARIO_FILE}"
 echo "Base seed: ${SEED}"
 echo "Output:    ${OUTPUT_DIR}"
-echo "Submitting 200 tasks..."
+echo "Submitting ${N_TASKS} tasks (${N_SCENARIOS} scenarios x ${N_PARAMS} params x ${N_VALUES} values x ${N_METHODS} methods)..."
 
 sbatch << JOBEOF
 #!/bin/bash --login
@@ -49,11 +51,11 @@ sbatch << JOBEOF
 #SBATCH -n 1
 #SBATCH --mem=4G
 #SBATCH --job-name=run_sensitivity
-#SBATCH -a 1-200
+#SBATCH -a 1-${N_TASKS}
 #SBATCH -o ${SCRATCH}/logs/sensitivity_%A_%a.out
 #SBATCH -e ${SCRATCH}/logs/sensitivity_%A_%a.err
 
-echo "Task \${SLURM_ARRAY_TASK_ID}/200 started: \$(date)"
+echo "Task \${SLURM_ARRAY_TASK_ID}/${N_TASKS} started: \$(date)"
 echo "Node: \$(hostname)"
 echo "Scenario file: ${SCENARIO_FILE}"
 echo "Base seed: ${SEED}"
