@@ -158,7 +158,7 @@ def main():
     # for writing
     fieldnames = [
         "run_id", "time_limit_s", "method",
-        "cost", "terminal_violation", "runtime_s", "simtime_s",
+        "cost", "squared_cost", "terminal_violation", "runtime_s", "simtime_s",
         "n_agents", "a", "e", "m", "tf", "epsilon_tol",
         "agent_commdelay", "faults", "scenario",
     ]
@@ -216,6 +216,7 @@ def main():
                     "time_limit_s": getattr(args, "time_limit", None),
                     "method": "MPPI-Recovery",
                     "cost": result["fuel"],
+                    "squared_cost": result["squared_cost"],
                     "terminal_violation": result["terminal_violation"],
                     "runtime_s": wall,
                     "simtime_s": result["sim_time"],
@@ -235,7 +236,8 @@ def main():
             print("\n=== Episode summary ===")
             print(f"status            : {result['status']}")
             print(f"terminal_violation: {result['terminal_violation']:.4e}")
-            print(f"fuel (sum||u||^2) : {result['fuel']:.4e}")
+            print(f"fuel (sum||u||) : {result['fuel']:.4e}")
+            print(f"squared_cost (sum||u||^2) : {result['squared_cost']:.4e}")
             print(f"recovery_cycles   : {result['recovery_cycles']}")
             print(f"removed_agents    : {result['removed_agents']}")
             print(f"final_active      : {result['final_active_agents']}")

@@ -146,6 +146,7 @@ def run_recovery_episode(
 
     log = {"transitions": [], "recovery_cycles": 0, "faults_injected": [], "removed_agents": []}
     fuel = 0.0
+    squared_cost = 0.0
     step = 0
     t = 0.0
     cycles = 0
@@ -277,9 +278,11 @@ def run_recovery_episode(
         for aid in active_ids:
             if active_mask[aid]:
                 if is_recovering:  
-                    fuel += float(np.dot(thrusts[aid], thrusts[aid])) * cfg.dt_detumble_fac
+                    fuel += float(np.linalg.norm(thrusts[aid])) * cfg.dt_detumble_fac
+                    squared_cost += float(np.dot(thrusts[aid], thrusts[aid])) * cfg.dt_detumble_fac
                 else:
-                    fuel += float(np.dot(thrusts[aid], thrusts[aid]))
+                    fuel += float(np.linalg.norm(thrusts[aid]))
+                    squared_cost += float(np.dot(thrusts[aid], thrusts[aid]))
 
         # The replan assumes t = 0, so the advance of the simulation must also behave as if t = 0
         # And during recovery process, we used a smaller dt to avoid extremely large omega after euler integration
@@ -311,6 +314,7 @@ def run_recovery_episode(
         "status": status,
         "terminal_violation": float(viol),
         "fuel": float(fuel),
+        "squared_cost": float(squared_cost),
         "steps": step,
         "sim_time": float(t),
         "recovery_cycles": cycles,
