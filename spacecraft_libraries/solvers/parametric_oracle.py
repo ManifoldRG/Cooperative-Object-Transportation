@@ -94,9 +94,15 @@ def build_inner_parametric(sys_params: SystemParams, bc: BoundaryConditions, eps
     # the epigraph gives a linear objective + smooth convex constraints and
     # the same optimal value (bias ~N*agents*FUEL_SMOOTH). Slacks are stacked
     # LAST so the (U, r, v, phi, ome) slice offsets are unchanged.
+    # Tiny L2 term restores STRICT convexity: pure fuel leaves the per-agent
+    # allocation of a given wrench non-unique (linear objective), making IPOPT
+    # outcome-sensitive to 1e-15 perturbations of tau (measured: two taus
+    # 4e-15 apart -> 558-iter converge vs 3000-iter blowup). Contribution
+    # ~0.04% of the fuel cost.
     FUEL_SMOOTH = 1e-4
+    FUEL_L2_REG = 1e-3
     T_slack = ca.SX.sym('t_fuel', num_agents * num_steps)
-    cost = ca.sum1(T_slack)
+    cost = ca.sum1(T_slack) + FUEL_L2_REG * ca.sumsqr(U)
 
     def get_t(i, k):
         return T_slack[i * num_steps + k]
@@ -346,8 +352,12 @@ class ScenarioOracle:
     """
 
     def __init__(self, sys_params: SystemParams, bc: BoundaryConditions, epsilon: float,
-                 inner_max_iter: int = 1000, warm_start_inner: bool = True,
+                 inner_max_iter: int = 3000, warm_start_inner: bool = True,
                  keep_outs=None):
+        # inner_max_iter 1000 -> 3000 with the fuel objective (2026-09-07):
+        # fuel cold solves run 500-1500 iters where energy took ~400; at 1000
+        # a fraction of cold starts died as Maximum_Iterations_Exceeded and
+        # surfaced as spurious GD abstentions.
         self.sys_params = sys_params
         self.bc = bc
         self.epsilon = epsilon

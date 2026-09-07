@@ -79,9 +79,13 @@ def solve_centralized_nlp_th(
     # solutions fuel-optimality pushes toward; the epigraph gives a linear
     # objective + smooth convex constraints and the same optimal value (bias
     # ~N*agents*FUEL_SMOOTH). Slacks stacked LAST: state slice offsets keep.
+    # tiny L2 term restores strict convexity of the allocation (see
+    # parametric_oracle: pure fuel is degenerate, IPOPT outcome flips on
+    # 1e-15 tau perturbations); ~0.04% of the fuel cost
     FUEL_SMOOTH = 1e-4
+    FUEL_L2_REG = 1e-3
     T_slack = ca.SX.sym('t_fuel', num_agents * N)
-    cost = ca.sum1(T_slack)
+    cost = ca.sum1(T_slack) + FUEL_L2_REG * ca.sumsqr(U)
 
     def get_t(i, k):
         return T_slack[i * N + k]
