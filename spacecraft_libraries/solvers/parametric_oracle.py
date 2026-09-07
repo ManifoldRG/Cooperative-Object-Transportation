@@ -31,6 +31,7 @@ import numpy as np
 from ..data_structures import BoundaryConditions, SystemParams
 from ..new_opts import (
     so3_exp,
+    so3_log,
     so3_exp_casadi,
     so3_log_casadi,
     state_attitude_to_phi,
@@ -55,10 +56,20 @@ def _silent_call(solver, **kwargs):
 
 def build_inner_parametric(sys_params: SystemParams, bc: BoundaryConditions, epsilon: float,
                            max_iter: int = 1000):
-    """Inner thrust-allocation NLP with tau as parameter (symbolic R_k(tau)).
+    """Inner thrust-allocation NLP with tau as parameter, attitude LIFTED.
+
+    The attitude trajectory (phi_k, ome_k) is decision variables with
+    stage-wise equality constraints (same chart as centralized_nlp_th and the
+    projector), NOT a pre-substituted chained expression R_k(tau). Given tau
+    and (phi_0, ome_0) the attitude block is a deterministic rollout, so the
+    optimal U/J/multipliers are unchanged — but expression depth is O(1)
+    instead of O(N), which keeps build time, Jacobian evaluation and memory
+    flat in N (the chained version segfaulted CasADi at N~900) and makes the
+    envelope gradient stage-sparse.
 
     Returns (solver, grad_fn, lbg, ubg, x_init, meta):
-      solver(x0=..., p=tau_flat, lbg=..., ubg=...) -> sol
+      solver(x0=..., p=tau_flat, lbx=meta['lbx'], ubx=meta['ubx'],
+             lbg=..., ubg=...) -> sol
       grad_fn(x, lam_g, tau_flat) -> dJ/dtau via the envelope theorem
     """
     num_steps = sys_params.N
@@ -69,6 +80,8 @@ def build_inner_parametric(sys_params: SystemParams, bc: BoundaryConditions, eps
     U = ca.SX.sym('U', num_agents * num_steps * 3)
     r = ca.SX.sym('r', (num_steps + 1) * 3)
     v = ca.SX.sym('v', (num_steps + 1) * 3)
+    phi = ca.SX.sym('phi', (num_steps + 1) * 3)
+    ome = ca.SX.sym('ome', (num_steps + 1) * 3)
 
     cost = ca.sumsqr(U)
 
@@ -82,6 +95,12 @@ def build_inner_parametric(sys_params: SystemParams, bc: BoundaryConditions, eps
     def get_v(k):
         return v[k * 3:k * 3 + 3]
 
+    def get_phi(k):
+        return phi[k * 3:k * 3 + 3]
+
+    def get_ome(k):
+        return ome[k * 3:k * 3 + 3]
+
     def get_tau(k):
         return tau_p[k * 3:k * 3 + 3]
 
@@ -89,20 +108,15 @@ def build_inner_parametric(sys_params: SystemParams, bc: BoundaryConditions, eps
     lbg = []
     ubg = []
 
-    constraints.extend([get_r(0) - bc.x0.r, get_v(0) - bc.x0.v])
-    lbg.extend([0] * 6)
-    ubg.extend([0] * 6)
-
     I_mat = ca.DM(np.asarray(sys_params.I))
     I_inv = ca.DM(np.linalg.inv(np.asarray(sys_params.I)))
     phi0 = state_attitude_to_phi(bc.x0)
-    Rs_sym = [ca.DM(so3_exp(phi0))]
-    ome_k = ca.DM(np.asarray(bc.x0.omega, dtype=float))
-    for k in range(num_steps):
-        ome_dot = I_inv @ (get_tau(k) - ca.cross(ome_k, I_mat @ ome_k))
-        R_next = Rs_sym[k] @ so3_exp_casadi(dt * ome_k)
-        Rs_sym.append(R_next)
-        ome_k = ome_k + dt * ome_dot
+    ome0 = np.asarray(bc.x0.omega, dtype=float)
+
+    constraints.extend([get_r(0) - bc.x0.r, get_v(0) - bc.x0.v,
+                        get_phi(0) - phi0, get_ome(0) - ome0])
+    lbg.extend([0] * 12)
+    ubg.extend([0] * 12)
 
     rs_body = [np.asarray(sys_params.rs[i], dtype=float) for i in range(num_agents)]
 
@@ -126,14 +140,28 @@ def build_inner_parametric(sys_params: SystemParams, bc: BoundaryConditions, eps
         lbg.extend([0] * 3)
         ubg.extend([0] * 3)
 
+        R_k = so3_exp_casadi(get_phi(k))
+
         Psi_k = th_psi_matrix(sys_params.mu, sys_params.a, sys_params.e, k * dt)
         Psi_vel = ca.DM(Psi_k[3:6, :])
         r_k = get_r(k)
         v_k = get_v(k)
         r_next = r_k + dt * v_k
         v_next = v_k + dt * (Psi_vel @ ca.vertcat(r_k, v_k)
-                             + (1.0 / sys_params.m) * Rs_sym[k] @ thrust_body)
+                             + (1.0 / sys_params.m) * R_k @ thrust_body)
         constraints.extend([get_r(k + 1) - r_next, get_v(k + 1) - v_next])
+        lbg.extend([0] * 6)
+        ubg.extend([0] * 6)
+
+        # attitude rollout as stage equalities (tau enters ONLY here + torque
+        # allocation above); no terminal attitude pin — the recursion from
+        # (phi0, ome0) fully determines the block, matching the old chained
+        # formulation exactly.
+        R_next = R_k @ so3_exp_casadi(dt * get_ome(k))
+        constraints.append(get_phi(k + 1) - so3_log_casadi(R_next))
+        constraints.append(get_ome(k + 1) - (get_ome(k)
+                           + dt * (I_inv @ (get_tau(k)
+                                            - ca.cross(get_ome(k), I_mat @ get_ome(k))))))
         lbg.extend([0] * 6)
         ubg.extend([0] * 6)
 
@@ -142,12 +170,44 @@ def build_inner_parametric(sys_params: SystemParams, bc: BoundaryConditions, eps
     ubg.extend([0] * 6)
 
     g = ca.vertcat(*constraints)
-    x = ca.vertcat(U, r, v)
+    x = ca.vertcat(U, r, v, phi, ome)
+
+    # principal-chart confinement, same as the projector / centralized_nlp_th
+    phi_bound = np.pi - 1e-3
+    omega_bound = 2 * (np.pi - 1e-3) / dt
+    n_free = num_agents * num_steps * 3 + 2 * (num_steps + 1) * 3
+    lbx = np.concatenate([
+        -np.inf * np.ones(n_free),
+        np.tile([-phi_bound] * 3, num_steps + 1),
+        np.tile([-omega_bound] * 3, num_steps + 1),
+    ])
+    ubx = -lbx
 
     nlp = {'x': x, 'p': tau_p, 'f': cost, 'g': g}
     opts = {"print_time": False,
             'ipopt': {'max_iter': max_iter, 'print_level': 0, 'sb': 'yes'}}
     solver = ca.nlpsol('inner_parametric', 'ipopt', nlp, opts)
+
+    # Second solver on the SAME nlp with IPOPT's warm-start recipe. Default
+    # options walk AWAY from a supplied near-optimal point (mu_init=0.1
+    # re-inflates the barrier while the ~active cone slacks are 0), which at
+    # large N never re-converges within max_iter — measured 2026-09-05:
+    # N=880 warm-from-optimum = 1000 iters/FAIL with defaults vs 2 iters/0.3 s
+    # with this recipe. mu_init=1e-6 is only valid NEAR a solution, so this
+    # solver must only ever be called warm-started (primal + duals); cold
+    # solves stay on the default solver above.
+    warm_ip = dict(opts['ipopt'])
+    warm_ip.update({
+        'warm_start_init_point': 'yes',
+        'mu_init': 1e-6,
+        'warm_start_bound_push': 1e-9,
+        'warm_start_bound_frac': 1e-9,
+        'warm_start_slack_bound_push': 1e-9,
+        'warm_start_slack_bound_frac': 1e-9,
+        'warm_start_mult_bound_push': 1e-9,
+    })
+    warm_solver = ca.nlpsol('inner_parametric_warm', 'ipopt', nlp,
+                            {'print_time': False, 'ipopt': warm_ip})
 
     lam_g = ca.SX.sym('lam_g', g.shape[0])
     lagrangian = cost + ca.dot(lam_g, g)
@@ -157,8 +217,11 @@ def build_inner_parametric(sys_params: SystemParams, bc: BoundaryConditions, eps
         np.zeros(num_agents * num_steps * 3),
         np.tile(bc.x0.r, num_steps + 1),
         np.tile(bc.x0.v, num_steps + 1),
+        np.tile(phi0, num_steps + 1),
+        np.tile(ome0, num_steps + 1),
     ])
-    meta = {'n_g': g.shape[0], 'n_x': x.shape[0]}
+    meta = {'n_g': g.shape[0], 'n_x': x.shape[0], 'warm_solver': warm_solver,
+            'lbx': lbx, 'ubx': ubx}
     return solver, grad_fn, np.array(lbg, dtype=float), np.array(ubg, dtype=float), x_init, meta
 
 
@@ -264,7 +327,11 @@ class ScenarioOracle:
          self._px0) = build_projector_parametric(sys_params, bc, epsilon,
                                                  keep_outs=keep_outs)
         self._warm = warm_start_inner
+        self._inner_warm = self.meta['warm_solver']
+        self._ilbx = self.meta['lbx']
+        self._iubx = self.meta['ubx']
         self._last_inner_x = None
+        self._last_inner_lam = None
 
     # -- projector ---------------------------------------------------------
     def project(self, tau):
@@ -292,12 +359,60 @@ class ScenarioOracle:
         return tau_opt, state_opt
 
     # -- inner problem ------------------------------------------------------
+    def _inner_cold_x0(self, tau_flat):
+        """Cold initial guess: numerically roll the attitude block out under
+        tau so the (phi, ome) stage equalities hold exactly at the start —
+        IPOPT then only has to solve the convex (U, r, v) part."""
+        sp = self.sys_params
+        N = self.N
+        dt = self.bc.tf / N
+        I = np.asarray(sp.I, dtype=float)
+        I_inv = np.linalg.inv(I)
+        phis = np.empty((N + 1, 3))
+        omes = np.empty((N + 1, 3))
+        phis[0] = state_attitude_to_phi(self.bc.x0)
+        omes[0] = np.asarray(self.bc.x0.omega, dtype=float)
+        R = so3_exp(phis[0])
+        for k in range(N):
+            tau_k = tau_flat[k * 3:k * 3 + 3]
+            R = R @ so3_exp(dt * omes[k])
+            phis[k + 1] = so3_log(R)
+            omes[k + 1] = omes[k] + dt * (I_inv @ (tau_k - np.cross(omes[k], I @ omes[k])))
+        n_ur_v = len(self._ix0_default) - 2 * (N + 1) * 3
+        x0 = self._ix0_default.copy()
+        x0[n_ur_v:n_ur_v + (N + 1) * 3] = phis.flatten()
+        x0[n_ur_v + (N + 1) * 3:] = omes.flatten()
+        return x0
+
+    def reset_warm(self):
+        """Drop the cached warm start (call when jumping to a distant tau,
+        e.g. a fresh random restart: the warm solver's mu_init is only valid
+        near the cached solution's basin)."""
+        self._last_inner_x = None
+        self._last_inner_lam = None
+
     def inner_cost(self, tau):
         tau_flat = np.asarray(tau, dtype=float).flatten()
-        x0 = self._last_inner_x if (self._warm and self._last_inner_x is not None) \
-            else self._ix0_default
+        # Warm path: previous primal AND duals through the warm-start solver.
+        # On any warm failure fall through to a cold default solve, so warm
+        # starting can only add speed, never change what is solvable.
+        if self._warm and self._last_inner_x is not None:
+            try:
+                sol = _silent_call(self._inner_warm, x0=self._last_inner_x,
+                                   lam_g0=self._last_inner_lam, p=tau_flat,
+                                   lbx=self._ilbx, ubx=self._iubx,
+                                   lbg=self._ilbg, ubg=self._iubg)
+                if self._inner_warm.stats().get('return_status', '') in _SUCCESS:
+                    x = np.asarray(sol['x']).flatten()
+                    lam = np.asarray(sol['lam_g']).flatten()
+                    self._last_inner_x, self._last_inner_lam = x, lam
+                    return True, float(sol['f']), x, lam
+            except Exception:
+                pass
         try:
-            sol = _silent_call(self._inner, x0=x0, p=tau_flat,
+            sol = _silent_call(self._inner, x0=self._inner_cold_x0(tau_flat),
+                               p=tau_flat,
+                               lbx=self._ilbx, ubx=self._iubx,
                                lbg=self._ilbg, ubg=self._iubg)
         except Exception:
             return False, float('inf'), None, None
@@ -306,6 +421,7 @@ class ScenarioOracle:
         lam = np.asarray(sol['lam_g']).flatten()
         if ok and self._warm:
             self._last_inner_x = x
+            self._last_inner_lam = lam
         cost = float(sol['f'])
         return ok, cost, x, lam
 

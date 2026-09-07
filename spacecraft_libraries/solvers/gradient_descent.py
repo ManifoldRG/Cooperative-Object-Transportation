@@ -111,6 +111,7 @@ def solve_centralized_gd(
     def _descend(start_tau=None):
         """One start: nominal (or given tau) -> project -> descend to
         stationarity. Returns (tau, J, x_sol, iters) — J=inf if failed."""
+        oracle.reset_warm()  # new start = new basin: don't warm across starts
         if start_tau is not None:
             nominal = np.asarray(start_tau, dtype=float).reshape(sys_params.N, 3)
         else:
@@ -205,7 +206,9 @@ def _package_gd_result(method, tau, J, x_sol, runtime, history, n_starts, sys_pa
     nU = num_agents * num_steps * 3
     U_opt = x_sol[:nU].reshape(num_agents, num_steps, 3)
     r_opt = x_sol[nU:nU + (num_steps + 1) * 3].reshape(num_steps + 1, 3)
-    v_opt = x_sol[nU + (num_steps + 1) * 3:].reshape(num_steps + 1, 3)
+    # exact slice: x also carries the lifted (phi, ome) states after v
+    v_opt = x_sol[nU + (num_steps + 1) * 3:
+                  nU + 2 * (num_steps + 1) * 3].reshape(num_steps + 1, 3)
 
     return {
         'method': method,
