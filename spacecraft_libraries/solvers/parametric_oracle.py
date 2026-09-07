@@ -83,11 +83,23 @@ def build_inner_parametric(sys_params: SystemParams, bc: BoundaryConditions, eps
     phi = ca.SX.sym('phi', (num_steps + 1) * 3)
     ome = ca.SX.sym('ome', (num_steps + 1) * 3)
 
-    cost = ca.sumsqr(U)
-
     def get_U(i, k):
         idx = (i * num_steps + k) * 3
         return U[idx:idx + 3]
+
+    # FUEL objective (was ca.sumsqr(U) energy before 2026-09-07), in epigraph
+    # form: minimize sum(t_ik) s.t. smooth_norm(U_ik) <= t_ik, t >= 0. The
+    # direct smoothed-norm objective stalls IPOPT (1000+ iters even at 1xT:
+    # near-nonsmooth at the zero thrust fuel-optimal solutions push toward);
+    # the epigraph gives a linear objective + smooth convex constraints and
+    # the same optimal value (bias ~N*agents*FUEL_SMOOTH). Slacks are stacked
+    # LAST so the (U, r, v, phi, ome) slice offsets are unchanged.
+    FUEL_SMOOTH = 1e-4
+    T_slack = ca.SX.sym('t_fuel', num_agents * num_steps)
+    cost = ca.sum1(T_slack)
+
+    def get_t(i, k):
+        return T_slack[i * num_steps + k]
 
     def get_r(k):
         return r[k * 3:k * 3 + 3]
@@ -130,9 +142,20 @@ def build_inner_parametric(sys_params: SystemParams, bc: BoundaryConditions, eps
             thrust_body += U_ik
 
             dot_product = ca.dot(U_ik, r_body)
-            norm_U = smooth_norm(U_ik, epsilon)
+            # recentered smoothing (smooth_norm - eps <= ||U||): U=0 must be
+            # FEASIBLE - fuel-optimal solutions switch thrusters off, and the
+            # uncentered form forbids that (RHS cos(nu)*eps*||rho|| > 0 at 0),
+            # parking the optimum in an eps-wide sliver IPOPT cannot resolve.
+            # Relaxes the cone by <= eps*cos(nu)*||rho|| (~1e-5 relative).
+            norm_U = smooth_norm(U_ik, epsilon) - epsilon
             norm_r = float(np.linalg.norm(rs_body[i]))
             constraints.append(dot_product - ca.cos(sys_params.nu) * norm_U * norm_r)
+            lbg.append(0)
+            ubg.append(ca.inf)
+
+            # fuel epigraph, recentered the same way: t=0 feasible at U=0
+            constraints.append(get_t(i, k)
+                               - (smooth_norm(U_ik, FUEL_SMOOTH) - FUEL_SMOOTH))
             lbg.append(0)
             ubg.append(ca.inf)
 
@@ -170,18 +193,26 @@ def build_inner_parametric(sys_params: SystemParams, bc: BoundaryConditions, eps
     ubg.extend([0] * 6)
 
     g = ca.vertcat(*constraints)
-    x = ca.vertcat(U, r, v, phi, ome)
+    x = ca.vertcat(U, r, v, phi, ome, T_slack)
 
-    # principal-chart confinement, same as the projector / centralized_nlp_th
+    # principal-chart confinement, same as the projector / centralized_nlp_th;
+    # fuel slacks t >= 0 at the tail
     phi_bound = np.pi - 1e-3
     omega_bound = 2 * (np.pi - 1e-3) / dt
     n_free = num_agents * num_steps * 3 + 2 * (num_steps + 1) * 3
+    n_t = num_agents * num_steps
     lbx = np.concatenate([
         -np.inf * np.ones(n_free),
         np.tile([-phi_bound] * 3, num_steps + 1),
         np.tile([-omega_bound] * 3, num_steps + 1),
+        np.zeros(n_t),
     ])
-    ubx = -lbx
+    ubx = np.concatenate([
+        np.inf * np.ones(n_free),
+        np.tile([phi_bound] * 3, num_steps + 1),
+        np.tile([omega_bound] * 3, num_steps + 1),
+        np.inf * np.ones(n_t),
+    ])
 
     nlp = {'x': x, 'p': tau_p, 'f': cost, 'g': g}
     opts = {"print_time": False,
@@ -219,6 +250,7 @@ def build_inner_parametric(sys_params: SystemParams, bc: BoundaryConditions, eps
         np.tile(bc.x0.v, num_steps + 1),
         np.tile(phi0, num_steps + 1),
         np.tile(ome0, num_steps + 1),
+        0.1 * np.ones(num_agents * num_steps),  # fuel slacks: interior start
     ])
     meta = {'n_g': g.shape[0], 'n_x': x.shape[0], 'warm_solver': warm_solver,
             'lbx': lbx, 'ubx': ubx}
@@ -378,10 +410,12 @@ class ScenarioOracle:
             R = R @ so3_exp(dt * omes[k])
             phis[k + 1] = so3_log(R)
             omes[k + 1] = omes[k] + dt * (I_inv @ (tau_k - np.cross(omes[k], I @ omes[k])))
-        n_ur_v = len(self._ix0_default) - 2 * (N + 1) * 3
+        # explicit offsets: x = [U, r, v, phi, ome, t_fuel]
+        n_agents = len(sp.rs)
+        base = n_agents * N * 3 + 2 * (N + 1) * 3
         x0 = self._ix0_default.copy()
-        x0[n_ur_v:n_ur_v + (N + 1) * 3] = phis.flatten()
-        x0[n_ur_v + (N + 1) * 3:] = omes.flatten()
+        x0[base:base + (N + 1) * 3] = phis.flatten()
+        x0[base + (N + 1) * 3:base + 2 * (N + 1) * 3] = omes.flatten()
         return x0
 
     def reset_warm(self):

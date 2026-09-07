@@ -73,7 +73,18 @@ def solve_centralized_nlp_th(
     def blk(x, k):
         return x[k * 3:k * 3 + 3]
 
-    cost = ca.sumsqr(U)
+    # FUEL objective (was ca.sumsqr(U) energy before 2026-09-07), in epigraph
+    # form: minimize sum(t_ik) s.t. smooth_norm(U_ik) <= t_ik, t >= 0. The
+    # direct smoothed-norm objective stalls IPOPT near the zero-thrust
+    # solutions fuel-optimality pushes toward; the epigraph gives a linear
+    # objective + smooth convex constraints and the same optimal value (bias
+    # ~N*agents*FUEL_SMOOTH). Slacks stacked LAST: state slice offsets keep.
+    FUEL_SMOOTH = 1e-4
+    T_slack = ca.SX.sym('t_fuel', num_agents * N)
+    cost = ca.sum1(T_slack)
+
+    def get_t(i, k):
+        return T_slack[i * N + k]
 
     I_mat = ca.DM(np.asarray(sys_params.I))
     I_inv = ca.DM(np.linalg.inv(np.asarray(sys_params.I)))
@@ -101,9 +112,16 @@ def solve_centralized_nlp_th(
             torque_curr += skew_casadi(rho) @ U_ik
             thrust_body += U_ik
             # cone (body frame), same smooth form as the inner problem
+            # recentered smoothing (see parametric_oracle): U=0 must be
+            # feasible or fuel-optimal off-thrusters are forbidden
             g.append(ca.dot(U_ik, rho)
-                     - ca.cos(sys_params.nu) * smooth_norm(U_ik, epsilon)
+                     - ca.cos(sys_params.nu)
+                     * (smooth_norm(U_ik, epsilon) - epsilon)
                      * float(np.linalg.norm(rs_body[i])))
+            lbg.append(0)
+            ubg.append(ca.inf)
+            # fuel epigraph, recentered: t=0 feasible at U=0
+            g.append(get_t(i, k) - (smooth_norm(U_ik, FUEL_SMOOTH) - FUEL_SMOOTH))
             lbg.append(0)
             ubg.append(ca.inf)
 
@@ -133,10 +151,11 @@ def solve_centralized_nlp_th(
         lbg.extend([0] * 3)
         ubg.extend([0] * 3)
 
-    x = ca.vertcat(U, r, v, phi, ome)
+    x = ca.vertcat(U, r, v, phi, ome, T_slack)
     g = ca.vertcat(*g)
 
-    # variable bounds: thrusts free; states free except attitude trust region
+    # variable bounds: thrusts free; states free except attitude trust region;
+    # fuel slacks t >= 0 at the tail
     phi_bound = np.pi - 1e-3
     omega_bound = 2 * (np.pi - 1e-3) / dt
     lbx = np.concatenate([
@@ -144,8 +163,15 @@ def solve_centralized_nlp_th(
         -np.inf * np.ones((N + 1) * 6),
         np.tile([-phi_bound] * 3, N + 1),
         np.tile([-omega_bound] * 3, N + 1),
+        np.zeros(num_agents * N),
     ])
-    ubx = -lbx
+    ubx = np.concatenate([
+        np.inf * np.ones(num_agents * N * 3),
+        np.inf * np.ones((N + 1) * 6),
+        np.tile([phi_bound] * 3, N + 1),
+        np.tile([omega_bound] * 3, N + 1),
+        np.inf * np.ones(num_agents * N),
+    ])
 
     opts = {"print_time": False,
             'ipopt': {'max_iter': max_iters, 'print_level': 0, 'sb': 'yes'}}
@@ -165,6 +191,8 @@ def solve_centralized_nlp_th(
         np.linspace(phi0, phif, N + 1).flatten(),
         np.linspace(np.asarray(bc.x0.omega, dtype=float),
                     np.asarray(bc.xf.omega, dtype=float), N + 1).flatten(),
+        np.maximum(np.linalg.norm(U0.reshape(num_agents, N, 3), axis=2).flatten(),
+                   0.1),  # fuel slacks: interior start consistent with U guess
     ])
 
     original_stdout = sys.stdout
@@ -183,7 +211,8 @@ def solve_centralized_nlp_th(
     r_opt = w[nU:nU + (N + 1) * 3].reshape(N + 1, 3)
     v_opt = w[nU + (N + 1) * 3:nU + (N + 1) * 6].reshape(N + 1, 3)
     phi_opt = w[nU + (N + 1) * 6:nU + (N + 1) * 9].reshape(N + 1, 3)
-    ome_opt = w[nU + (N + 1) * 9:].reshape(N + 1, 3)
+    # exact slice: fuel slacks sit after ome in x
+    ome_opt = w[nU + (N + 1) * 9:nU + (N + 1) * 12].reshape(N + 1, 3)
     X = np.hstack([r_opt, v_opt, phi_opt, ome_opt])  # (N+1, 12), harness layout
     runtime = time.perf_counter() - start
 

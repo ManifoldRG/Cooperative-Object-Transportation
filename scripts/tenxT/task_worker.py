@@ -99,8 +99,11 @@ def main():
          + np.linalg.norm(v - np.asarray(bc.xf.v, float))
          + att_err + np.linalg.norm(w - np.asarray(bc.xf.omega, float)))
 
+    # fuel cost: sum of per-thruster 2-norms (matches the solvers' smoothed
+    # fuel objective; this is the exact, unsmoothed value)
     row.update(wall_s=round(wall, 1), cost_reported=float(res["cost"]),
-               cost_rollout=float(np.sum(U ** 2)), V_rollout=float(V),
+               cost_rollout=float(np.linalg.norm(U, axis=2).sum()),
+               V_rollout=float(V),
                ipopt_status=status, converged=conv)
     _write(out_dir, sid, method, row)
     os._exit(0)  # skip CasADi teardown (segfaults at N~900)

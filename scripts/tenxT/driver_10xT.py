@@ -37,8 +37,10 @@ print(f"{len(done)} done, {len(todo)} to run (workers={K})", flush=True)
 # hard per-task wall caps: a single uncapped IPOPT call inside GD can run
 # tens of minutes on pathological instances. At a 60 s budget that IS a
 # failure — kill and record it.
-CAP_S = {"decentralized_gd": 12 * 60, "centralized_gd": 5 * 60,
-         "centralized_nlp_th": 5 * 60}
+# fuel objective makes cold inner solves ~10x slower than energy did:
+# caps sized so a single legitimate cold solve at 10xT cannot be killed
+CAP_S = {"decentralized_gd": 20 * 60, "centralized_gd": 10 * 60,
+         "centralized_nlp_th": 10 * 60}
 
 running = {}  # popen -> (sid, method, t0)
 t_start = time.perf_counter()
