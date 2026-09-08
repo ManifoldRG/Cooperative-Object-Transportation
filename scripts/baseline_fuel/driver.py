@@ -14,6 +14,7 @@ WORKER = os.path.join(HERE, "task_worker.py")
 K = int(os.environ.get("WORKERS", "5"))
 BUDGETS = [float(b) for b in os.environ.get("BUDGETS", "10,30,60,300").split(",")]
 T_MULT = int(os.environ.get("T_MULT", "1"))
+TRIALS = int(os.environ.get("TRIALS", "10"))  # scenarios per angle (max 20)
 RES_DIR = os.path.join(HERE, f"results_json_{T_MULT}x")
 OUT_CSV = os.path.join(HERE, "results", f"fuel_baseline_{T_MULT}xT.csv")
 METHODS = ["decentralized_gd", "centralized_gd", "centralized_nlp_th"]
@@ -23,7 +24,7 @@ import pandas as pd
 
 sc = pd.read_csv(os.path.join(REPO, "CSF Runs", "results_20260823",
                               "baseline_large_20_scenarios_th.csv"))
-sc = sc.groupby("thrust_angle_deg", group_keys=False).head(10)
+sc = sc.groupby("thrust_angle_deg", group_keys=False).head(TRIALS)
 
 # ascending budgets: the cheap sweeps land complete first
 wanted = [(int(r.global_scenario_id), m, b)
@@ -34,7 +35,8 @@ wanted = [(int(r.global_scenario_id), m, b)
 os.makedirs(RES_DIR, exist_ok=True)
 done = {f[:-5] for f in os.listdir(RES_DIR) if f.endswith(".json")}
 todo = [t for t in wanted if f"{t[0]}_{t[1]}_{int(t[2])}" not in done]
-print(f"{len(done)} done, {len(todo)} to run (workers={K}, budgets={BUDGETS})",
+print(f"{len(done)} done, {len(todo)} to run (workers={K}, budgets={BUDGETS}, "
+      f"trials/angle={TRIALS}, T_MULT={T_MULT})",
       flush=True)
 
 
