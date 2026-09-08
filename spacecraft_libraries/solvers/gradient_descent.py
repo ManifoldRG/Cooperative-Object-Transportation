@@ -103,7 +103,11 @@ def solve_centralized_gd(
     def time_left():
         return max_runtime_s is None or (time.perf_counter() - start) < max_runtime_s
 
-    oracle = ScenarioOracle(sys_params, bc, epsilon, keep_outs=keep_outs)
+    # per-call CPU cap = the run's budget: one IPOPT call may consume the
+    # whole budget but never (much) more, so wall stays O(budget) even when a
+    # cold solve cannot converge (fuel objective at large N)
+    oracle = ScenarioOracle(sys_params, bc, epsilon, keep_outs=keep_outs,
+                            max_solve_cpu_s=max_runtime_s)
 
     history = {'n_inner': 0, 'n_proj': 0, 'grad_norm': [], 'restart_J': [],
                'restart_iters': []}

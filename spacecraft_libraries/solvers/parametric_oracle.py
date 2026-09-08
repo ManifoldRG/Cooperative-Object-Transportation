@@ -55,7 +55,7 @@ def _silent_call(solver, **kwargs):
 
 
 def build_inner_parametric(sys_params: SystemParams, bc: BoundaryConditions, epsilon: float,
-                           max_iter: int = 1000):
+                           max_iter: int = 1000, max_cpu_time=None):
     """Inner thrust-allocation NLP with tau as parameter, attitude LIFTED.
 
     The attitude trajectory (phi_k, ome_k) is decision variables with
@@ -223,6 +223,11 @@ def build_inner_parametric(sys_params: SystemParams, bc: BoundaryConditions, eps
     nlp = {'x': x, 'p': tau_p, 'f': cost, 'g': g}
     opts = {"print_time": False,
             'ipopt': {'max_iter': max_iter, 'print_level': 0, 'sb': 'yes'}}
+    # per-CALL CPU cap: without it a single cold solve can run for hours at
+    # large N under the fuel objective, making wall budgets meaningless (the
+    # GD loop only checks time BETWEEN calls)
+    if max_cpu_time is not None:
+        opts['ipopt']['max_cpu_time'] = float(max_cpu_time)
     solver = ca.nlpsol('inner_parametric', 'ipopt', nlp, opts)
 
     # Second solver on the SAME nlp with IPOPT's warm-start recipe. Default
@@ -233,7 +238,7 @@ def build_inner_parametric(sys_params: SystemParams, bc: BoundaryConditions, eps
     # with this recipe. mu_init=1e-6 is only valid NEAR a solution, so this
     # solver must only ever be called warm-started (primal + duals); cold
     # solves stay on the default solver above.
-    warm_ip = dict(opts['ipopt'])
+    warm_ip = dict(opts['ipopt'])  # carries max_cpu_time if set
     warm_ip.update({
         'warm_start_init_point': 'yes',
         'mu_init': 1e-6,
@@ -264,7 +269,7 @@ def build_inner_parametric(sys_params: SystemParams, bc: BoundaryConditions, eps
 
 
 def build_projector_parametric(sys_params: SystemParams, bc: BoundaryConditions, epsilon: float,
-                               keep_outs=None):
+                               keep_outs=None, max_cpu_time=None):
     """tau_proj_nonlin_new with tau_hist as a parameter. Same constraints,
     bounds and default initial guess as the legacy function.
 
@@ -334,6 +339,8 @@ def build_projector_parametric(sys_params: SystemParams, bc: BoundaryConditions,
 
     nlp = {'x': opt_vars, 'p': tau_hist_p, 'f': cost, 'g': g}
     opts = {"print_time": False, 'ipopt': {'print_level': 0, 'sb': 'yes'}}
+    if max_cpu_time is not None:
+        opts['ipopt']['max_cpu_time'] = float(max_cpu_time)
     solver = ca.nlpsol('proj_parametric', 'ipopt', nlp, opts)
 
     x0 = np.concatenate([np.zeros(num_steps * 3),
@@ -353,7 +360,7 @@ class ScenarioOracle:
 
     def __init__(self, sys_params: SystemParams, bc: BoundaryConditions, epsilon: float,
                  inner_max_iter: int = 3000, warm_start_inner: bool = True,
-                 keep_outs=None):
+                 keep_outs=None, max_solve_cpu_s=None):
         # inner_max_iter 1000 -> 3000 with the fuel objective (2026-09-07):
         # fuel cold solves run 500-1500 iters where energy took ~400; at 1000
         # a fraction of cold starts died as Maximum_Iterations_Exceeded and
@@ -364,10 +371,12 @@ class ScenarioOracle:
         self.N = sys_params.N
         (self._inner, self.grad_fn, self._ilbg, self._iubg,
          self._ix0_default, self.meta) = build_inner_parametric(
-            sys_params, bc, epsilon, max_iter=inner_max_iter)
+            sys_params, bc, epsilon, max_iter=inner_max_iter,
+            max_cpu_time=max_solve_cpu_s)
         (self._proj, self._plbg, self._pubg, self._plbx, self._pubx,
          self._px0) = build_projector_parametric(sys_params, bc, epsilon,
-                                                 keep_outs=keep_outs)
+                                                 keep_outs=keep_outs,
+                                                 max_cpu_time=max_solve_cpu_s)
         self._warm = warm_start_inner
         self._inner_warm = self.meta['warm_solver']
         self._ilbx = self.meta['lbx']
