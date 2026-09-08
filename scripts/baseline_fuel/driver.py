@@ -10,12 +10,12 @@ Out:  results/fuel_baseline_1xT.csv (merged at the end of every run)
 import os, sys, json, time, subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-RES_DIR = os.path.join(HERE, "results_json")
-OUT_CSV = os.path.join(HERE, "results", "fuel_baseline_1xT.csv")
 WORKER = os.path.join(HERE, "task_worker.py")
 K = int(os.environ.get("WORKERS", "5"))
 BUDGETS = [float(b) for b in os.environ.get("BUDGETS", "10,30,60,300").split(",")]
-T_MULT = 1
+T_MULT = int(os.environ.get("T_MULT", "1"))
+RES_DIR = os.path.join(HERE, f"results_json_{T_MULT}x")
+OUT_CSV = os.path.join(HERE, "results", f"fuel_baseline_{T_MULT}xT.csv")
 METHODS = ["decentralized_gd", "centralized_gd", "centralized_nlp_th"]
 REPO = os.environ.get("COT_REPO") or os.path.dirname(os.path.dirname(HERE))
 
@@ -40,10 +40,12 @@ print(f"{len(done)} done, {len(todo)} to run (workers={K}, budgets={BUDGETS})",
 
 def cap_s(method, budget):
     # dGD budget is per-agent (6x wall) + build/solve overhead; fuel cold
-    # solves can run minutes past the budget check
+    # solves can run minutes past the budget check, and ~10x longer again at
+    # 10x timesteps - caps must never kill a legitimate in-flight solve
+    slack = 900 * T_MULT
     if method == "decentralized_gd":
-        return 6 * budget + 900
-    return budget + 600
+        return 6 * budget + 6 * slack
+    return budget + slack
 
 
 running = {}  # popen -> (sid, method, budget, t0)
@@ -53,13 +55,14 @@ total = len(todo)
 while todo or running:
     while todo and len(running) < K:
         sid, m, b = todo.pop(0)
+        err = open(os.path.join(RES_DIR, f"{sid}_{m}_{int(b)}.err"), "w")
         p = subprocess.Popen([sys.executable, WORKER, str(sid), m, str(b),
                               str(T_MULT), RES_DIR],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        running[p] = (sid, m, b, time.perf_counter())
+                             stdout=subprocess.DEVNULL, stderr=err)
+        running[p] = (sid, m, b, time.perf_counter(), err)
     time.sleep(5)
     for p in list(running):
-        sid, m, b, t0 = running[p]
+        sid, m, b, t0, err_h = running[p]
         age = time.perf_counter() - t0
         if p.poll() is None and age > cap_s(m, b):
             p.kill()
@@ -76,6 +79,7 @@ while todo or running:
                                converged=""), f)
         if p.poll() is not None:
             running.pop(p)
+            err_h.close()
             finished += 1
             have = os.path.exists(os.path.join(RES_DIR, f"{sid}_{m}_{int(b)}.json"))
             print(f"[{finished}/{total}] {sid} {m} {int(b)}s exit={p.returncode} "
@@ -83,6 +87,11 @@ while todo or running:
                   f"({(time.perf_counter()-t_start)/60:.1f} min)", flush=True)
 
 # merge all JSONs into one CSV
+# drop empty .err files (kept only when a worker wrote to stderr)
+for f in os.listdir(RES_DIR):
+    p = os.path.join(RES_DIR, f)
+    if f.endswith(".err") and os.path.getsize(p) == 0:
+        os.remove(p)
 rows = [json.load(open(os.path.join(RES_DIR, f)))
         for f in sorted(os.listdir(RES_DIR)) if f.endswith(".json")]
 os.makedirs(os.path.dirname(OUT_CSV), exist_ok=True)
