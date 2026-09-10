@@ -27,7 +27,8 @@ def solve_centralized_mppi(
     oracle = None
     if use_oracle:
         from .parametric_oracle import ScenarioOracle
-        oracle = ScenarioOracle(sys_params, bc, epsilon)
+        oracle = ScenarioOracle(sys_params, bc, epsilon,
+                                max_solve_cpu_s=max_runtime_s)
 
     nominal = make_nominal_tau(sys_params, bc, epsilon, rng)
 

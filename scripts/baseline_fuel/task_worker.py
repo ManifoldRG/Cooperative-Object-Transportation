@@ -25,6 +25,10 @@ def main():
     from spacecraft_libraries.solvers.gradient_descent import (
         solve_centralized_gd, solve_decentralized_gd)
     from spacecraft_libraries.solvers.centralized_nlp_th import solve_centralized_nlp_th
+    from spacecraft_libraries.solvers.greedy_sampler import (
+        solve_centralized_gs, solve_decentralized_gs)
+    from spacecraft_libraries.solvers.centralized_mppi import solve_centralized_mppi
+    from spacecraft_libraries.solvers.decentralized_mppi import solve_decentralized_mppi
     from scipy.spatial.transform import Rotation
     from spacecraft_libraries.new_opts import th_psi_matrix, state_attitude_to_phi
 
@@ -58,10 +62,45 @@ def main():
                                          tau_init_scale=0.1, rel_step=0.03,
                                          max_runtime_s=budget)
             status, conv = "", ""
-        else:
+        elif method == "centralized_nlp_th":
             res = solve_centralized_nlp_th(sys_params, bc, epsilon,
                                            max_runtime_s=budget)
             status, conv = res["ipopt_status"], str(res["converged"])
+        elif method == "centralized_ga":
+            # harness defaults (baseline_comparison run_one_solver)
+            res = bcmod.run_centralized_ga_seeded(
+                sys_params, bc, epsilon, pop_size=10, generations=5000,
+                max_runtime_s=budget, seed=seed)
+            status, conv = "", ""
+        elif method in ("centralized_gs", "decentralized_gs"):
+            # harness CLI defaults: sigma .05, step 1.5, tau_init .1,
+            # batch 4, white noise
+            kw = dict(n_samples=4, sigma=0.05, tau_init_scale=0.1,
+                      noise_mode="white", step_size=1.5, max_runtime_s=budget)
+            if method == "centralized_gs":
+                res = solve_centralized_gs(sys_params, bc, epsilon,
+                                           seed=seed, **kw)
+            else:
+                res = solve_decentralized_gs(sys_params, bc, epsilon,
+                                             base_seed=seed, **kw)
+            status, conv = "", ""
+        elif method in ("centralized_mppi", "decentralized_mppi"):
+            # harness defaults: sigma 1.0, lambda .5 (c) / .9 (d),
+            # deadline-driven iterations, batch from SAMPLE_SCHEDULE
+            ns = bcmod.SAMPLE_SCHEDULE.get(budget, 10)
+            if method == "centralized_mppi":
+                res = solve_centralized_mppi(
+                    sys_params, bc, epsilon, seed=seed,
+                    n_iter=bcmod.MPPI_DEADLINE_ITERS, n_samples=ns,
+                    sigma=1.0, lambda_=0.5, max_runtime_s=budget)
+            else:
+                res = solve_decentralized_mppi(
+                    sys_params, bc, epsilon, base_seed=seed,
+                    n_iter=bcmod.MPPI_DEADLINE_ITERS, n_samples=ns,
+                    sigma=1.0, lambda_=0.9, max_runtime_s=budget)
+            status, conv = "", ""
+        else:
+            raise ValueError(f"unknown method {method}")
     except Exception as e:
         row.update(wall_s=round(time.perf_counter() - t0, 1),
                    cost_reported=None, cost_rollout=None, V_rollout=None,
@@ -70,7 +109,10 @@ def main():
         os._exit(0)
 
     wall = time.perf_counter() - t0
-    U = np.asarray(res["control"], dtype=float)
+    # GD/NLP return a raw (agents, N, 3) array; GA/GS/MPPI wrap the same
+    # layout in a ControlHistory dataclass under .U
+    ctrl = res["control"]
+    U = np.asarray(getattr(ctrl, "U", ctrl), dtype=float)
 
     # independent rollout through the discrete dynamics
     N = sys_params.N

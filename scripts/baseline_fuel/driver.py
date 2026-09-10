@@ -12,12 +12,21 @@ import os, sys, json, time, subprocess
 HERE = os.path.dirname(os.path.abspath(__file__))
 WORKER = os.path.join(HERE, "task_worker.py")
 K = int(os.environ.get("WORKERS", "5"))
-BUDGETS = [float(b) for b in os.environ.get("BUDGETS", "10,30,60,300").split(",")]
+BUDGETS = [float(b) for b in os.environ.get("BUDGETS", "10,30,60,300,600").split(",")]
 T_MULT = int(os.environ.get("T_MULT", "1"))
 TRIALS = int(os.environ.get("TRIALS", "10"))  # scenarios per angle (max 20)
 RES_DIR = os.path.join(HERE, f"results_json_{T_MULT}x")
 OUT_CSV = os.path.join(HERE, "results", f"fuel_baseline_{T_MULT}xT.csv")
-METHODS = ["decentralized_gd", "centralized_gd", "centralized_nlp_th"]
+# paper roster (user decision 2026-09-10): GD (ours, both variants), NLP
+# (gold standard), GA (previously proposed method), MPPI (standard sampling
+# baseline, both variants for fairness). GS dropped as clutter (tuned
+# in-house sampler, not a recognized baseline); nlp_th_warm excluded (its
+# warm-start prep still runs the legacy ENERGY inner). Override with
+# env METHODS=a,b,c.
+METHODS = os.environ.get(
+    "METHODS",
+    "decentralized_gd,centralized_gd,centralized_nlp_th,"
+    "centralized_ga,centralized_mppi,decentralized_mppi").split(",")
 REPO = os.environ.get("COT_REPO") or os.path.dirname(os.path.dirname(HERE))
 
 import pandas as pd
@@ -45,7 +54,7 @@ def cap_s(method, budget):
     # solves can run minutes past the budget check, and ~10x longer again at
     # 10x timesteps - caps must never kill a legitimate in-flight solve
     slack = 900 * T_MULT
-    if method == "decentralized_gd":
+    if method.startswith("decentralized"):
         return 6 * budget + 6 * slack
     return budget + slack
 

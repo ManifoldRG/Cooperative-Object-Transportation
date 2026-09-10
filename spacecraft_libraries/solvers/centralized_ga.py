@@ -27,7 +27,12 @@ def solve_centralized_ga(
     inner_adapter = None
     if use_oracle and attitude == "so3":
         from .parametric_oracle import ScenarioOracle
-        oracle = ScenarioOracle(sys_params, bc, epsilon)
+        # GA's deadline is checked once per GENERATION (~pop_size evals),
+        # so each eval gets the per-candidate share of the budget - one
+        # generation then costs ~budget and wall stays O(budget).
+        _cap = None if max_runtime_s is None else max_runtime_s / max(pop_size, 1)
+        oracle = ScenarioOracle(sys_params, bc, epsilon,
+                                max_solve_cpu_s=_cap)
 
         def inner_adapter(tau):
             ok, cost, _, _ = oracle.inner_cost(tau)

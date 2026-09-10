@@ -576,7 +576,16 @@ def opt_given_tau_ipopt_new(tau, N, epsilon, sys_params: SystemParams, bc: Bound
     r = ca.SX.sym('r', (num_steps + 1) * 3)
     v = ca.SX.sym('v', (num_steps + 1) * 3)
 
-    cost = ca.sumsqr(U)
+    # FUEL objective (matches parametric_oracle / centralized_nlp_th since
+    # 2026-09-10; was energy ca.sumsqr(U)): epigraph slacks + tiny L2 for
+    # strict convexity of the allocation.
+    FUEL_SMOOTH = 1e-4
+    FUEL_L2_REG = 1e-3
+    T_slack = ca.SX.sym('t_fuel', num_agents * num_steps)
+    cost = ca.sum1(T_slack) + FUEL_L2_REG * ca.sumsqr(U)
+
+    def get_t(i, k):
+        return T_slack[i * num_steps + k]
 
     constraints = []
     constraints_lb = []
@@ -635,10 +644,18 @@ def opt_given_tau_ipopt_new(tau, N, epsilon, sys_params: SystemParams, bc: Bound
             # Pointing constraint in the body frame: each agent's body-frame
             # thrust must lie inside the cone around its body-frame attachment.
             dot_product = ca.dot(U_ik, r_body)
-            norm_U = smooth_norm(U_ik, epsilon_casadi)
+            # recentered smoothing: U=0 must be feasible (fuel-optimal
+            # solutions switch thrusters off); relaxation <= eps (~1e-5 rel)
+            norm_U = smooth_norm(U_ik, epsilon_casadi) - epsilon_casadi
             norm_r = float(np.linalg.norm(rs_body[i]))
             pointing_constraint = dot_product - ca.cos(nu_casadi) * norm_U * norm_r
             constraints.append(pointing_constraint)
+            constraints_lb.append(0)
+            constraints_ub.append(ca.inf)
+
+            # fuel epigraph, recentered: t=0 feasible at U=0
+            constraints.append(get_t(i, k)
+                               - (smooth_norm(U_ik, FUEL_SMOOTH) - FUEL_SMOOTH))
             constraints_lb.append(0)
             constraints_ub.append(ca.inf)
 
@@ -675,12 +692,18 @@ def opt_given_tau_ipopt_new(tau, N, epsilon, sys_params: SystemParams, bc: Bound
     lbg = np.array(constraints_lb)
     ubg = np.array(constraints_ub)
 
-    opt_vars = ca.vertcat(U, r, v)
+    opt_vars = ca.vertcat(U, r, v, T_slack)
+
+    n_urv = num_agents * num_steps * 3 + 2 * (num_steps + 1) * 3
+    lbx = np.concatenate([-np.inf * np.ones(n_urv),
+                          np.zeros(num_agents * num_steps)])
+    ubx = np.inf * np.ones(n_urv + num_agents * num_steps)
 
     opt_vars_init = np.concatenate([
         U_guess.flatten(),
         np.tile(bc.x0.r, num_steps + 1),
         np.tile(bc.x0.v, num_steps + 1),
+        0.1 * np.ones(num_agents * num_steps),  # fuel slacks: interior start
     ])
 
     nlp = {'x': opt_vars, 'f': cost, 'g': g}
@@ -697,7 +720,7 @@ def opt_given_tau_ipopt_new(tau, N, epsilon, sys_params: SystemParams, bc: Bound
     try:
         with open(os.devnull, 'w') as f:
             inner_start = time.perf_counter()
-            sol = solver(x0=opt_vars_init, lbg=lbg, ubg=ubg)
+            sol = solver(x0=opt_vars_init, lbx=lbx, ubx=ubx, lbg=lbg, ubg=ubg)
             inner_runtime_s = time.perf_counter() - inner_start
     finally:
         sys.stdout = original_stdout

@@ -48,7 +48,8 @@ def solve_centralized_gs(
     rng = np.random.default_rng(seed)
     start = time.perf_counter()
 
-    oracle = ScenarioOracle(sys_params, bc, epsilon) if use_oracle else None
+    oracle = ScenarioOracle(sys_params, bc, epsilon,
+                            max_solve_cpu_s=max_runtime_s) if use_oracle else None
     nominal = make_nominal_tau(sys_params, bc, epsilon, rng, tau_init_scale=tau_init_scale)
 
     best_tau, best_cost, history = run_mppi(
@@ -106,7 +107,8 @@ def solve_decentralized_gs(
     graph = _build_line_of_sight_graph_with_degree(
         attach_vecs, line_of_sight_limit, graph_degree)
 
-    oracle = ScenarioOracle(sys_params, bc, epsilon) if use_oracle else None
+    oracle = ScenarioOracle(sys_params, bc, epsilon,
+                            max_solve_cpu_s=max_runtime_s) if use_oracle else None
     start = time.perf_counter()
     effective_limit = None if max_runtime_s is None else max_runtime_s * num_agents
 
