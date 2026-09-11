@@ -643,7 +643,7 @@ def opt_given_tau_ipopt_new(tau, N, epsilon, sys_params: SystemParams, bc: Bound
 
             # Pointing constraint in the body frame: each agent's body-frame
             # thrust must lie inside the cone around its body-frame attachment.
-            dot_product = ca.dot(U_ik, r_body)
+            dot_product = ca.dot(U_ik, -r_body)
             # recentered smoothing: U=0 must be feasible (fuel-optimal
             # solutions switch thrusters off); relaxation <= eps (~1e-5 rel)
             norm_U = smooth_norm(U_ik, epsilon_casadi) - epsilon_casadi

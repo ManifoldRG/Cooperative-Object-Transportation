@@ -94,7 +94,7 @@ class AgentController:
         v_body = R.T @ np.asarray(sensed.v, dtype=float).reshape(3)
         omega = np.asarray(sensed.omega, dtype=float).reshape(3)
         u_des = -c.k_v * v_body - c.k_w * np.cross(omega, self.r_body)
-        return project_into_cone(u_des, self.r_body, self.nu, c.u_max)
+        return project_into_cone(u_des, -self.r_body, self.nu, c.u_max)
 
     # ----------------------------------------------------------- transitions
     def check_tracking_deviation(self, sensed: StateVectorLie) -> bool:

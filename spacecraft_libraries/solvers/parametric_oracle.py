@@ -147,7 +147,7 @@ def build_inner_parametric(sys_params: SystemParams, bc: BoundaryConditions, eps
             torque_curr += skew_casadi(r_body) @ U_ik
             thrust_body += U_ik
 
-            dot_product = ca.dot(U_ik, r_body)
+            dot_product = ca.dot(U_ik, -r_body)
             # recentered smoothing (smooth_norm - eps <= ||U||): U=0 must be
             # FEASIBLE - fuel-optimal solutions switch thrusters off, and the
             # uncentered form forbids that (RHS cos(nu)*eps*||rho|| > 0 at 0),
