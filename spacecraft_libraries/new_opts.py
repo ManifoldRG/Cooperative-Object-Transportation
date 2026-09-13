@@ -556,7 +556,7 @@ def tau_proj_nonlin_so3_poly2_new(tau_hist, N, epsilon, sys_params: SystemParams
     return tau_opt, state_opt
 
 
-def opt_given_tau_ipopt_new(tau, N, epsilon, sys_params: SystemParams, bc: BoundaryConditions, num_iter=None):
+def opt_given_tau_ipopt_new(tau, N, epsilon, sys_params: SystemParams, bc: BoundaryConditions, num_iter=None, max_cpu_time=None):
 
     num_steps = N
     num_agents = len(sys_params.rs)
@@ -712,6 +712,10 @@ def opt_given_tau_ipopt_new(tau, N, epsilon, sys_params: SystemParams, bc: Bound
         opts = {"print_time": False, 'ipopt': {'print_level': 0, 'sb': 'yes'}}
     else:
         opts = {"print_time": False,'ipopt': {'max_iter': num_iter, 'print_level': 0, 'sb': 'yes'}}
+    # per-call CPU cap (fairness: samplers' finalize must not get compute the
+    # budgeted search - and GD's capped calls - are denied)
+    if max_cpu_time is not None:
+        opts['ipopt']['max_cpu_time'] = float(max_cpu_time)
 
     solver = ca.nlpsol('given_tau_ipopt', 'ipopt', nlp, opts)
 

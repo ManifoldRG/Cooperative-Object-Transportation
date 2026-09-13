@@ -67,7 +67,8 @@ def solve_centralized_gs(
     )
 
     traj, ctrl, q, cost = new_opts.opt_given_tau_ipopt_new(
-        best_tau, sys_params.N, epsilon, sys_params, bc, num_iter=1000)
+        best_tau, sys_params.N, epsilon, sys_params, bc, num_iter=1000,
+        max_cpu_time=max_runtime_s)
     runtime = time.perf_counter() - start
 
     return {
@@ -154,7 +155,8 @@ def solve_decentralized_gs(
     # best sample) — finalize with the inner solve directly, symmetric with
     # the centralized contract (no redundant re-projection).
     traj, ctrl, q, cost = new_opts.opt_given_tau_ipopt_new(
-        winner_tau, sys_params.N, epsilon, sys_params, bc, num_iter=1000)
+        winner_tau, sys_params.N, epsilon, sys_params, bc, num_iter=1000,
+        max_cpu_time=max_runtime_s)
     runtime = time.perf_counter() - start
 
     return {
