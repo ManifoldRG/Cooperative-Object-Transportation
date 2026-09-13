@@ -69,12 +69,13 @@ from spacecraft_libraries.solvers.decentralized_mppi import solve_decentralized_
 # were never comparable and all pre-2026-08-17 NLP columns are artifacts.
 # "_warm" seeds the thrust variables with the bilevel pipeline's first
 # iterate (inner solve at the projected shooting nominal).
+# Paper roster (2026-09-10): GD (ours, both variants), NLP cold (gold
+# standard), GA (previously proposed), MPPI (standard sampling baseline,
+# both variants). GS dropped (in-house sampler, not a recognized baseline);
+# nlp_th_warm excluded (unbudgeted warm-start prep).
 METHODS = [
     "centralized_nlp_th",
-    "centralized_nlp_th_warm",
     "centralized_ga",
-    "centralized_gs",
-    "decentralized_gs",
     "centralized_gd",
     "decentralized_gd",
     "centralized_mppi",
@@ -90,7 +91,7 @@ SEEDED_METHODS = {"centralized_ga"} | GS_METHODS | GD_METHODS | MPPI_METHODS
 # max_runtime_s is the binding stop condition (mirrors GS's DEADLINE_ITERS).
 MPPI_DEADLINE_ITERS = 1_000_000
 
-TIME_LIMITS = [60.0, 300.0, 600.0, 1200.0]
+TIME_LIMITS = [10.0, 30.0, 60.0, 300.0, 600.0]
 # Default batch-size-by-budget fallback, used only when a variant's own
 # --*-n-samples is left unset. Same schedule for every stochastic method;
 # override per variant on the command line if a method needs its own.
@@ -102,7 +103,8 @@ SAMPLE_SCHEDULE = {
 
 FIELDNAMES = [
     "scenario_id", "method", "time_limit_s",
-    "cost", "terminal_violation", "runtime_s",
+    "cost", "cost_rollout", "terminal_violation", "runtime_s",
+    "ipopt_status", "converged",
     "n_agents", "a", "e", "m", "tf", "epsilon_tol", "nu",
     "solver_seed",                      # GA, all GS/GD/MPPI variants
     "tau_init_std", "sigma", "step_size", "noise_mode", "n_samples",  # GS
@@ -256,29 +258,67 @@ def run_one_solver(method: str, sys_params, bc, epsilon, max_runtime_s: float,
     except Exception as exc:
         print(f"  [{method}] failed — {exc}")
         traceback.print_exc()
-        return {"cost": float("nan"), "terminal_violation": float("nan"), "runtime_s": float("nan")}
+        return {"cost": float("nan"), "cost_rollout": float("nan"),
+                "terminal_violation": float("nan"), "runtime_s": float("nan"),
+                "ipopt_status": f"ABSTAIN:{type(exc).__name__}", "converged": ""}
 
     cost = result.get("cost")
     if cost is None or (isinstance(cost, float) and np.isnan(cost)):
-        return {"cost": float("nan"), "terminal_violation": float("nan"), "runtime_s": float("nan")}
+        return {"cost": float("nan"), "cost_rollout": float("nan"),
+                "terminal_violation": float("nan"), "runtime_s": float("nan"),
+                "ipopt_status": "NO_COST", "converged": ""}
 
-    if method in GD_METHODS:
-        # Terminal r,v,phi,omega are hard equality constraints in GD's inner
-        # solve and projector; no trajectory object is returned to check.
-        violation = 0.0
-    else:
-        terminal = _extract_terminal_state(result, method)
-        violation = (
-            terminal_violation(terminal["r"], bc.xf.r)
-            + terminal_violation(terminal["v"], bc.xf.v)
-            + lie_attitude_violation(terminal["phi"], bc.xf.phi)
-            + terminal_violation(terminal["omega"], bc.xf.omega)
-        )
+    # Independent verification for EVERY method: roll the returned controls
+    # through the discrete dynamics in NumPy and score terminal violation and
+    # exact fuel from that rollout. Never trust solver-reported state — non-
+    # converged NLP iterates can satisfy their own state pins while violating
+    # dynamics (measured: claimed V=3e-25 vs true V=0.22), and GD previously
+    # hardcoded 0.0 here.
+    ctrl = result["control"]
+    U = np.asarray(getattr(ctrl, "U", ctrl), dtype=float)
+    cost_rollout, violation = _rollout_verify(sys_params, bc, U)
     return {
         "cost": float(result["cost"]),
+        "cost_rollout": float(cost_rollout),
         "terminal_violation": float(violation),
         "runtime_s": float(result["runtime"]),
+        "ipopt_status": result.get("ipopt_status", ""),
+        "converged": str(result.get("converged", "")),
     }
+
+
+def _rollout_verify(sys_params, bc, U):
+    """Exact fuel and terminal violation of controls U (agents, N, 3) under
+    the discrete TH + Lie dynamics, computed independently of any solver."""
+    from scipy.spatial.transform import Rotation
+    from spacecraft_libraries.new_opts import th_psi_matrix, state_attitude_to_phi
+    N = sys_params.N
+    dt = bc.tf / N
+    I = np.asarray(sys_params.I, dtype=float)
+    I_inv = np.linalg.inv(I)
+    rs = [np.asarray(x, float) for x in sys_params.rs]
+    rr = np.asarray(bc.x0.r, float).copy()
+    v = np.asarray(bc.x0.v, float).copy()
+    R = Rotation.from_rotvec(state_attitude_to_phi(bc.x0)).as_matrix()
+    w = np.asarray(bc.x0.omega, float).copy()
+    for k in range(N):
+        Uk = U[:, k, :]
+        thrust_body = Uk.sum(axis=0)
+        torque = sum(np.cross(rs[i], Uk[i]) for i in range(len(rs)))
+        Psi = np.asarray(th_psi_matrix(sys_params.mu, sys_params.a,
+                                       sys_params.e, k * dt))
+        r_new = rr + dt * v
+        v_new = v + dt * (Psi[3:6, :] @ np.concatenate([rr, v])
+                          + (R @ thrust_body) / sys_params.m)
+        R = R @ Rotation.from_rotvec(dt * w).as_matrix()
+        w = w + dt * (I_inv @ (torque - np.cross(w, I @ w)))
+        rr, v = r_new, v_new
+    Rf = Rotation.from_rotvec(state_attitude_to_phi(bc.xf)).as_matrix()
+    att_err = np.linalg.norm(Rotation.from_matrix(R.T @ Rf).as_rotvec())
+    V = (np.linalg.norm(rr - np.asarray(bc.xf.r, float))
+         + np.linalg.norm(v - np.asarray(bc.xf.v, float))
+         + att_err + np.linalg.norm(w - np.asarray(bc.xf.omega, float)))
+    return float(np.linalg.norm(U, axis=2).sum()), float(V)
 
 
 def parse_args() -> argparse.Namespace:
