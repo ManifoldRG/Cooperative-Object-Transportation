@@ -118,7 +118,9 @@ def solve_centralized_nlp_th(
             # cone (body frame), same smooth form as the inner problem
             # recentered smoothing (see parametric_oracle): U=0 must be
             # feasible or fuel-optimal off-thrusters are forbidden
-            g.append(ca.dot(U_ik, rho)
+            # cone axis -rho (thrust inward, exhaust outward), matching the
+            # oracle/legacy inner after the 2026-09-11 correction
+            g.append(ca.dot(U_ik, -rho)
                      - ca.cos(sys_params.nu)
                      * (smooth_norm(U_ik, epsilon) - epsilon)
                      * float(np.linalg.norm(rs_body[i])))
