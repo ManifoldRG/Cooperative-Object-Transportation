@@ -28,7 +28,8 @@ import time
 import cvxpy as cp
 import numpy as np
 
-from ..new_opts import so3_exp, state_attitude_to_phi, th_psi_matrix
+from ..data_structures import ControlHistory, StateVectorLie, Trajectory
+from ..new_opts import so3_exp, so3_log, state_attitude_to_phi, th_psi_matrix
 
 FUEL_L2_REG = 1e-3
 
@@ -181,3 +182,26 @@ def envelope_grad_socp(sys_params, bc, tau, sol):
         F = np.eye(3) - dt * I_inv @ (_skew(w) @ I - _skew(I @ w))
         obar_next = obar_E + F.T @ obar_next
     return grad
+
+
+def socp_finalize(sys_params, bc, tau, solver="CLARABEL"):
+    """Drop-in replacement for the legacy opt_given_tau_ipopt_new finalize:
+    returns (traj, ctrl, q, cost) built from the EXACT SOCP solution.
+    Raises RuntimeError if the SOCP does not certify optimality."""
+    N = sys_params.N
+    dt = bc.tf / N
+    tau = np.asarray(tau, float).reshape(N, 3)
+    sol = solve_inner_socp(sys_params, bc, tau, solver=solver)
+    if not sol.get("ok"):
+        raise RuntimeError(f"inner SOCP failed: {sol.get('status')}")
+    Rs, omes = attitude_rollout(sys_params, bc, tau)
+    states = [StateVectorLie(r=sol["r"][k], v=sol["v"][k],
+                             phi=so3_log(Rs[k]), omega=omes[k])
+              for k in range(N + 1)]
+    traj = Trajectory(states=states, times=np.linspace(0.0, bc.tf, N + 1))
+    U = sol["U"]
+    ctrl = ControlHistory(tau=tau, U=U, force=np.sum(U, axis=0), dt=dt)
+    rs_body = [np.asarray(r, float) for r in sys_params.rs]
+    q = np.array([[Rs[k] @ rs_body[i] for k in range(N)]
+                  for i in range(len(rs_body))])
+    return traj, ctrl, q, sol["J"]

@@ -35,8 +35,9 @@ def solve_centralized_ga(
                                 max_solve_cpu_s=_cap)
 
         def inner_adapter(tau):
-            ok, cost, _, _ = oracle.inner_cost(tau)
-            return cost if ok else float("inf")
+            from .socp_inner import solve_inner_socp
+            sol = solve_inner_socp(sys_params, bc, tau)
+            return sol["J"] if sol.get("ok") else float("inf")
 
     if attitude == "so3":
         projector = oracle.proj_compat if oracle is not None else new_opts.tau_proj_nonlin_new
@@ -98,7 +99,8 @@ def solve_centralized_ga(
     if timing_stats is not None:
         timing_stats["total_s"] = timing_stats.get("total_s", 0.0) + (time.perf_counter() - _proj_t0)
         timing_stats["n_calls"] = timing_stats.get("n_calls", 0) + 1
-    traj, ctrl, q, cost = new_opts.opt_given_tau_ipopt_new(tau, sys_params.N, epsilon, sys_params, bc, num_iter=1000, max_cpu_time=max_runtime_s)
+    from .socp_inner import socp_finalize
+    traj, ctrl, q, cost = socp_finalize(sys_params, bc, tau)
 
     return {
         "method": f"centralized_ga_{attitude}",

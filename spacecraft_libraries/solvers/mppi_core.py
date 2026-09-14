@@ -102,10 +102,9 @@ def evaluate_tau(
         if tau_proj is None :
             return np.asarray(tau, dtype=float).reshape(N, 3), float("inf")
         tau_proj = np.asarray(tau_proj, dtype=float).reshape(N, 3)
-        _, _, _, cost = new_opts.opt_given_tau_ipopt_new(
-            tau_proj, N, epsilon, sys_params, bc, num_iter=1000 #changed to 1000
-        )
-        cost = float(cost)
+        from .socp_inner import solve_inner_socp
+        sol = solve_inner_socp(sys_params, bc, tau_proj)
+        cost = float(sol["J"]) if sol.get("ok") else float("inf")
         if not np.isfinite(cost) or cost <= 0:
             return tau_proj, float("inf")
         return tau_proj, cost

@@ -485,11 +485,14 @@ class ScenarioOracle:
     # -- combined hot-path evaluation (project then allocate) ---------------
     def evaluate(self, tau):
         """Mirror of mppi_core.evaluate_tau: (projected_tau, cost); +inf on
-        any failure."""
+        any failure. Scoring goes through the EXACT inner SOCP (2026-09-14):
+        ~15x faster than the smoothed IPOPT inner and exact-cone consistent
+        with GD's descent and the samplers' finalize."""
+        from .socp_inner import solve_inner_socp
         tau_proj, _ = self.project(tau)
         if tau_proj is None:
             return np.asarray(tau, dtype=float).reshape(self.N, 3), float('inf')
-        ok, cost, _, _ = self.inner_cost(tau_proj)
-        if not ok or not np.isfinite(cost) or cost <= 0:
+        sol = solve_inner_socp(self.sys_params, self.bc, tau_proj)
+        if not sol.get('ok') or not np.isfinite(sol['J']) or sol['J'] <= 0:
             return tau_proj, float('inf')
-        return tau_proj, cost
+        return tau_proj, sol['J']

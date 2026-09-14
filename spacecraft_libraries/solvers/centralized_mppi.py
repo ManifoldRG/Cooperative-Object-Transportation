@@ -47,10 +47,8 @@ def solve_centralized_mppi(
         oracle=oracle,
     )
 
-    traj, ctrl, q, cost = new_opts.opt_given_tau_ipopt_new(
-        best_tau, sys_params.N, epsilon, sys_params, bc, num_iter=1000,
-        max_cpu_time=max_runtime_s,
-    )
+    from .socp_inner import socp_finalize
+    traj, ctrl, q, cost = socp_finalize(sys_params, bc, best_tau)
     runtime = time.perf_counter() - start
 
     return {
