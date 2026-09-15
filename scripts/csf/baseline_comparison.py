@@ -276,7 +276,13 @@ def run_one_solver(method: str, sys_params, bc, epsilon, max_runtime_s: float,
     # hardcoded 0.0 here.
     ctrl = result["control"]
     U = np.asarray(getattr(ctrl, "U", ctrl), dtype=float)
-    cost_rollout, violation = _rollout_verify(sys_params, bc, U)
+    try:
+        cost_rollout, violation = _rollout_verify(sys_params, bc, U)
+    except Exception:
+        # divergent controls (non-converged iterates) can blow up the rollout
+        # numerically (SVD-did-not-converge on a NaN rotation); that IS a
+        # failure - record it instead of crashing the task
+        cost_rollout, violation = float("nan"), float("inf")
     return {
         "cost": float(result["cost"]),
         "cost_rollout": float(cost_rollout),
@@ -313,6 +319,9 @@ def _rollout_verify(sys_params, bc, U):
         R = R @ Rotation.from_rotvec(dt * w).as_matrix()
         w = w + dt * (I_inv @ (torque - np.cross(w, I @ w)))
         rr, v = r_new, v_new
+        if not (np.isfinite(rr).all() and np.isfinite(v).all()
+                and np.isfinite(w).all()):
+            return float("nan"), float("inf")
     Rf = Rotation.from_rotvec(state_attitude_to_phi(bc.xf)).as_matrix()
     att_err = np.linalg.norm(Rotation.from_matrix(R.T @ Rf).as_rotvec())
     V = (np.linalg.norm(rr - np.asarray(bc.xf.r, float))

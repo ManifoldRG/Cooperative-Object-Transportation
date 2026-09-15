@@ -136,11 +136,18 @@ def main():
         R = R @ Rotation.from_rotvec(dt * w).as_matrix()
         w = w + dt * (I_inv @ (torque - np.cross(w, I @ w)))
         rr, v = r_new, v_new
-    Rf = Rotation.from_rotvec(state_attitude_to_phi(bc.xf)).as_matrix()
-    att_err = np.linalg.norm(Rotation.from_matrix(R.T @ Rf).as_rotvec())
-    V = (np.linalg.norm(rr - np.asarray(bc.xf.r, float))
-         + np.linalg.norm(v - np.asarray(bc.xf.v, float))
-         + att_err + np.linalg.norm(w - np.asarray(bc.xf.omega, float)))
+        if not (np.isfinite(rr).all() and np.isfinite(v).all()
+                and np.isfinite(w).all()):
+            break
+    try:
+        Rf = Rotation.from_rotvec(state_attitude_to_phi(bc.xf)).as_matrix()
+        att_err = np.linalg.norm(Rotation.from_matrix(R.T @ Rf).as_rotvec())
+        V = (np.linalg.norm(rr - np.asarray(bc.xf.r, float))
+             + np.linalg.norm(v - np.asarray(bc.xf.v, float))
+             + att_err + np.linalg.norm(w - np.asarray(bc.xf.omega, float)))
+    except Exception:
+        # divergent controls blow up the rollout numerically: honest failure
+        V = float("inf")
 
     # exact fuel of the returned controls (solvers minimize the smoothed
     # epigraph version of the same quantity)
