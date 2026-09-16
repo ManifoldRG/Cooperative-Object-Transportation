@@ -54,8 +54,8 @@ def _make_plan(sys_params: SystemParams, bc: BoundaryConditions, epsilon: float,
             random_restart_scale=cfg.gd_random_restart_scale,
             parallel=False,
         )
-        traj, ctrl, q, cost = new_opts.opt_given_tau_ipopt_new(
-            res["tau"], sys_params.N, epsilon, sys_params, bc, num_iter=1000)
+        from ..solvers.socp_inner import socp_finalize
+        traj, ctrl, q, cost = socp_finalize(sys_params, bc, res["tau"])
         return {
             "method": "decentralized_gd",
             "tau": res["tau"],
@@ -76,8 +76,8 @@ def _make_plan(sys_params: SystemParams, bc: BoundaryConditions, epsilon: float,
             max_runtime_s=cfg.gd_budget_s,
             random_restart_scale=cfg.gd_random_restart_scale,
         )
-        traj, ctrl, q, cost = new_opts.opt_given_tau_ipopt_new(
-            res["tau"], sys_params.N, epsilon, sys_params, bc, num_iter=1000)
+        from ..solvers.socp_inner import socp_finalize
+        traj, ctrl, q, cost = socp_finalize(sys_params, bc, res["tau"])
         return {
             "method": "centralized_gd",
             "tau": res["tau"],
