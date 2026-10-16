@@ -107,6 +107,13 @@ CSF Runs/         campaign results and scenario sets
 tests/            closed-loop and MPPI tests
 ```
 
+## Multi-payload extension
+
+[`multi_payload/`](multi_payload/README.md) extends the method to several payloads
+sharing one swarm: allocation of agents to attachment points, and collision-free
+transport via waypoint-repaired references and per-payload corridors, solved with a
+modified copy of the COT solver. It is ongoing work, not part of the paper.
+
 ## Citation
 
 ```bibtex
