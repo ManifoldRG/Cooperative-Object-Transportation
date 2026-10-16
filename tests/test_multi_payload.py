@@ -109,3 +109,18 @@ def test_pipeline_end_to_end_small():
     v = out["verify"]
     assert out["status"] == "ok"
     assert v["collision_free"] and v["all_terminal_ok"] and v["certificate_ok"]
+
+
+def test_docking_captures_all_agents():
+    from multi_payload import docking
+    sc = _small(M=2, points=4, agents=4, seed=6)
+    occupied = [[0, 1], [0, 1]]
+    starts = docking.agent_starts(sc, seed=0)
+    dp = docking.DockingProblem(sc, starts, T_dock=300.0, N_dock=15)
+    # payload drift is integrated backward so docking ends exactly at x0
+    for j, P in enumerate(sc.payloads):
+        assert np.allclose(dp.drift[j][0][-1], P.x0.r) and np.allclose(dp.drift[j][1][-1], P.x0.v)
+    asg, _ = docking.assign(dp, occupied)
+    assert sorted(asg) == [(0, 0), (0, 1), (1, 0), (1, 1)]
+    sim = docking.simulate(dp, asg, noise=0.02, seed=1)
+    assert sim["all_captured"]

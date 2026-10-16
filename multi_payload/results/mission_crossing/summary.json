@@ -1,0 +1,114 @@
+{
+ "status": "ok",
+ "M": 3,
+ "n_agents": 12,
+ "N": 52,
+ "tf": 521.9730999288475,
+ "nu_deg": 59.99999999999999,
+ "delta": 109.60803519594165,
+ "meta": {
+  "layout": "crossing",
+  "seed": 3,
+  "nu_deg": 60.0,
+  "n_points": 6,
+  "ring_radius": 500.0
+ },
+ "lower_bound": 325.46312926654014,
+ "timing": {
+  "references": 0.9456966000143439,
+  "allocation": 35.79206250002608,
+  "oracle": 182.14226230001077,
+  "total": 218.90597050008364
+ },
+ "repairs": 2,
+ "allocation": {
+  "method": "misocp",
+  "occupied": [
+   [
+    0,
+    1,
+    2,
+    3,
+    5
+   ],
+   [
+    0,
+    1,
+    2,
+    4
+   ],
+   [
+    2,
+    4,
+    5
+   ]
+  ],
+  "case": "fuel",
+  "J_hat": 523.8173353635191,
+  "residual": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "gamma": [
+   195.09648667488736,
+   239.1252607626486,
+   89.59558792598318
+  ],
+  "stage1_max_residual": 4.113668759924477e-12,
+  "mip_case": "fuel"
+ },
+ "J_final": 483.52685688594124,
+ "min_separation": 127.98151096249536,
+ "collision_free": true,
+ "all_terminal_ok": true,
+ "certificate_ok": true,
+ "payloads": [
+  {
+   "fuel": 180.85926559429737,
+   "V": 4.3159907121342505e-11,
+   "max_slack": 0.0
+  },
+  {
+   "fuel": 217.03953209874214,
+   "V": 4.487812490143853e-11,
+   "max_slack": 3.375861115996195e-12
+  },
+  {
+   "fuel": 85.62805919290173,
+   "V": 5.660985863936768e-11,
+   "max_slack": 0.0
+  }
+ ],
+ "attitude_ref_terminal_error": [
+  4.3291519422510794e-11,
+  3.933949469244449e-11,
+  5.2305800982816516e-11
+ ],
+ "oracle_log": [
+  {
+   "outer": 0,
+   "payload": 0,
+   "attempt": 0,
+   "fuel": 180.85926559429737,
+   "max_slack": 0.0,
+   "max_eps": 0.0
+  },
+  {
+   "outer": 0,
+   "payload": 1,
+   "attempt": 0,
+   "fuel": 217.03953209874214,
+   "max_slack": 3.375861115996195e-12,
+   "max_eps": 0.0
+  },
+  {
+   "outer": 0,
+   "payload": 2,
+   "attempt": 0,
+   "fuel": 85.62805919290173,
+   "max_slack": 0.0,
+   "max_eps": 0.0
+  }
+ ]
+}

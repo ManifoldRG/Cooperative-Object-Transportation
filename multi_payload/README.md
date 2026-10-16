@@ -44,11 +44,32 @@ needs MOSEK).
 
 **Certificate:** lower bound ≤ J* ≤ J_final ≤ surrogate, all reported.
 
+**Docking** (`docking.py`)
+
+Agents start free-flying and dock before transport begins. Docking runs on
+t ∈ [−T_dock, 0] and ends exactly at each payload's transport start state; during
+it the payloads drift uncontrolled (propagated backward through the same dynamics).
+Agents are matched to the allocated points by the Hungarian method on docking fuel,
+then each runs shrinking-horizon fuel-optimal MPC in the style of Park, Di Cairano
+and Kolmanovsky (ACC 2011): a line-of-sight cone from the docking port (vertex
+moved slightly inside the payload), a tangent half-plane, an approach-speed limit
+and soft docking (velocity matched to the port), with a thrust limit. Constraints
+are softened with a large penalty so the closed loop stays feasible under thrust
+execution noise. Agents do not avoid each other during docking; the minimum
+agent–agent distance is reported.
+
+**Animation** (`animate.py`). PyVista render of the whole mission (allocation,
+docking, transport) in the style of the eight-agent demo, driven by the computed
+trajectories, with a camera that smoothly zooms to frame the active objects.
+Geometry is to scale.
+
 ## Run
 
 ```bash
 py multi_payload/scripts/run_demo.py --layout crossing --M 3 --points 6 --agents 12 --nu 60
 py multi_payload/scripts/run_demo.py --layout random --M 4 --allocation misocp
+py multi_payload/scripts/run_mission.py --layout crossing --M 3 --agents 12   # + docking + mission.mp4
+py multi_payload/scripts/run_mission.py --out <dir> --render-only             # re-render from cache
 pytest tests/test_multi_payload.py
 ```
 
