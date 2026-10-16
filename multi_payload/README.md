@@ -44,6 +44,12 @@ needs MOSEK).
 
 **Certificate:** lower bound ≤ J* ≤ J_final ≤ surrogate, all reported.
 
+**Objective.** `--objective fuel` (Σ‖u‖, the paper's, default) or `--objective energy`
+(Σ‖u‖², continuous thrust). It is used consistently by every stage (references,
+repair scoring, allocation, corridor SOCP, COT solver, docking MPC), and the
+certificate is reported in its units. For energy, the lower bound is
+Σ_j ℓ_j / A_j (Cauchy–Schwarz over the A_j agents of payload j).
+
 **Docking** (`docking.py`)
 
 Agents start free-flying and dock before transport begins. Docking runs on
