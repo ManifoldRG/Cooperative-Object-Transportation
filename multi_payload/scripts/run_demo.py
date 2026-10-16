@@ -33,6 +33,8 @@ def main():
     p.add_argument("--ring", type=float, default=500.0, help="layout radius [m]")
     p.add_argument("--allocation", choices=("greedy", "misocp"), default="greedy")
     p.add_argument("--step5", choices=("cgd", "dgd"), default="cgd")
+    p.add_argument("--objective", choices=("fuel", "energy"), default="fuel",
+                   help="sum ||u|| (paper) or sum ||u||^2 (continuous thrust)")
     p.add_argument("--budget", type=float, default=60.0, help="COT budget per payload [s]")
     p.add_argument("--restarts", type=int, default=None, help="max GD starts (default: until budget)")
     p.add_argument("--eps", type=float, default=0.0, help="initial corridor radius [m]")
@@ -51,7 +53,8 @@ def main():
           f"nu={a.nu} deg, delta={sc.delta:.1f} m")
 
     out = pipeline.run(sc, allocation=a.allocation, step5=a.step5, budget_s=a.budget,
-                       eps0=a.eps, rho=a.rho, seed=a.seed, max_restarts=a.restarts)
+                       eps0=a.eps, rho=a.rho, seed=a.seed, max_restarts=a.restarts,
+                       objective=a.objective)
     summ = pipeline.summary(sc, out)
     tmp = a.out / ".summary.json.tmp"
     tmp.write_text(json.dumps(summ, indent=1, default=lambda o: o.tolist()

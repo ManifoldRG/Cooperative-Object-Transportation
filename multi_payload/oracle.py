@@ -37,10 +37,12 @@ def room(sc, refs, eps, j):
 
 
 def solve_payload(sc, j, occupied, ref, tau_ref, eps_j, rho, method="cgd",
-                  budget_s=60.0, seed=0, max_restarts=None, corridor=True):
+                  budget_s=60.0, seed=0, max_restarts=None, corridor=True,
+                  objective="fuel"):
     sp, bc = sc.sys_params_for(j, occupied)
     cor = dict(rbar=ref["r"], eps=eps_j, rho=rho) if corridor else None
-    common = dict(corridor=cor, max_runtime_s=budget_s, initial_tau=tau_ref)
+    common = dict(corridor=cor, max_runtime_s=budget_s, initial_tau=tau_ref,
+                  objective=objective)
     if method == "dgd":
         return solve_decentralized_gd(sp, bc, sc.epsilon, base_seed=seed,
                                       max_restarts_per_island=max_restarts, **common)
@@ -52,7 +54,7 @@ def solve_payload(sc, j, occupied, ref, tau_ref, eps_j, rho, method="cgd",
 def run_oracle(sc, refs, waypoints, occupied, tau_refs, eps, rho=1e3,
                method="cgd", budget_s=60.0, seed=0, max_restarts=None,
                slack_tol=1e-3, expand_margin=1.0, max_expand=3, max_outer=3,
-               psis=None, verbose=False):
+               psis=None, verbose=False, objective="fuel"):
     """Returns dict(status, payloads=[...], refs, waypoints, eps, log)."""
     say = print if verbose else (lambda *a, **k: None)
     eps = [np.asarray(e, float).copy() for e in eps]
@@ -65,11 +67,12 @@ def run_oracle(sc, refs, waypoints, occupied, tau_refs, eps, rho=1e3,
         for j in sorted(todo):
             for it in range(max_expand + 1):
                 res = solve_payload(sc, j, occupied[j], refs[j], tau_refs[j], eps[j], rho,
-                                    method, budget_s, seed, max_restarts)
+                                    method, budget_s, seed, max_restarts, objective=objective)
                 s = res["slack"]
                 log.append(dict(outer=outer, payload=j, attempt=it, fuel=res["fuel"],
+                                cost=res["objective_cost"],
                                 max_slack=float(s.max()), max_eps=float(eps[j].max())))
-                say(f"  payload {j}: attempt {it}, fuel {res['fuel']:.4f}, "
+                say(f"  payload {j}: attempt {it}, {objective} {res['objective_cost']:.4f}, "
                     f"max slack {s.max():.2e} m, max eps {eps[j].max():.2f} m")
                 results[j] = res
                 if s.max() <= slack_tol:
@@ -92,7 +95,8 @@ def run_oracle(sc, refs, waypoints, occupied, tau_refs, eps, rho=1e3,
         for j in list(need_room):
             try:
                 free = solve_payload(sc, j, occupied[j], refs[j], tau_refs[j], eps[j], rho,
-                                     method, budget_s, seed, max_restarts, corridor=False)
+                                     method, budget_s, seed, max_restarts, corridor=False,
+                                     objective=objective)
                 feasible = np.isfinite(free["cost"])
             except RuntimeError:
                 feasible = False
@@ -104,7 +108,8 @@ def run_oracle(sc, refs, waypoints, occupied, tau_refs, eps, rho=1e3,
             eps[j] = np.maximum(eps[j], want)
             eps[j][0] = eps[j][-1] = 0.0
         before = [r["r"].copy() for r in refs]
-        refs, waypoints, rlog, ok = repair(sc, refs, waypoints, eps, psis=psis)
+        refs, waypoints, rlog, ok = repair(sc, refs, waypoints, eps, psis=psis,
+                                           objective=objective)
         log.append(dict(outer=outer, repair=rlog, converged=ok))
         say(f"  re-repair with larger corridors: {len(rlog)} waypoint(s), converged={ok}")
         todo = {j for j in range(sc.M)

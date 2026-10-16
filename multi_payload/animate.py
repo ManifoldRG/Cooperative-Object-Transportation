@@ -168,7 +168,7 @@ def render(sc, out, dp, dock, assignment, path, fps=30, size=(1920, 1080),
     nozzle = pv.Cone(center=(0, 0, 0.62 * s_ag), direction=(0, 0, -1), height=0.35 * s_ag,
                      radius=0.32 * s_ag, resolution=24)
     plume = pv.Cone(center=(0, 0, 0.5), direction=(0, 0, -1), height=1.0,
-                    radius=0.12, resolution=24)
+                    radius=1.0, resolution=24)
     agents = []
     for _ in assignment:
         agents.append(dict(
@@ -197,18 +197,21 @@ def render(sc, out, dp, dock, assignment, path, fps=30, size=(1920, 1080),
         for key in ("body", "nozzle"):
             agents[a][key].user_matrix = _tf(F, r)
             agents[a][key].visibility = visible
-        L = max(frac, 0.0) * 6.0 * s_ag
-        agents[a]["plume"].visibility = visible and L > 0.05 * s_ag
-        agents[a]["plume"].user_matrix = _tf(F, r + F[:, 2] * 0.8 * s_ag,
-                                             (L / 1.0 * 0.6 + 1e-6, L / 1.0 * 0.6 + 1e-6, L))
+        # length ~ sqrt(thrust) so moderate thrust stays visible; fixed width
+        on = frac > 0.01
+        L = s_ag * (1.0 + 6.0 * np.sqrt(max(frac, 0.0)))
+        w = 0.28 * s_ag
+        agents[a]["plume"].visibility = visible and on
+        agents[a]["plume"].user_matrix = _tf(F, r + F[:, 2] * 0.8 * s_ag, (w, w, L))
 
     n_intro, n_alloc, n_dock, n_tr, n_out = (int(round(x * fps)) for x in durations)
     total = n_intro + n_alloc + n_dock + n_tr + n_out
-    head = title or f"{sc.M} payloads, {len(assignment)} agents"
+    obj = out.get("objective", "fuel")
+    head = title or f"{sc.M} payloads, {len(assignment)} agents (minimum {obj})"
     cap_text = {
         "intro": "Agents start free-flying; payloads must reach their goal poses (white wireframes).",
-        "alloc": "Allocation: agents choose attachment points (orange) minimizing surrogate fuel.",
-        "dock": "Docking: each agent runs fuel-optimal MPC with a line-of-sight approach cone.",
+        "alloc": f"Allocation: agents choose attachment points (orange) minimizing surrogate {obj}.",
+        "dock": f"Docking: each agent runs {obj}-optimal MPC with a line-of-sight approach cone.",
         "tr": "Transport: payloads follow collision-free corridors; plumes show agent thrust.",
         "out": "All payloads delivered: collision-free, verified with the full orbital dynamics.",
     }

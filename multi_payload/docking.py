@@ -17,7 +17,7 @@ Avoidance", ACC 2011: during the final approach the agent stays inside a
 line-of-sight cone from the docking port (vertex moved r_tol inside the
 payload) and in front of the tangent half-plane at the port, its approach
 speed is limited, and it docks softly (velocity matched to the port). Here
-the cost is fuel sum ||u||, the dynamics are the paper's discrete TH model
+the cost is fuel sum ||u|| (or energy sum ||u||^2), the dynamics are the paper's discrete TH model
 (agents as point masses, thrust in the Hill frame, ||u|| <= u_max), and
 every constraint except the dynamics is softened with a large penalty so the
 closed loop stays feasible under actuation noise.
@@ -85,7 +85,9 @@ class DockingProblem:
 
     def __init__(self, sc, starts, T_dock=400.0, N_dock=40, m_agent=20.0, u_max=2.0,
                  los_half_angle_deg=30.0, los_fraction=0.3, r_tol=2.0,
-                 approach_rate=1.0 / 30.0, approach_v0=0.05, penalty=1e3):
+                 approach_rate=1.0 / 30.0, approach_v0=0.05, penalty=1e3,
+                 objective="fuel"):
+        self.objective = objective
         self.sc, self.starts = sc, np.asarray(starts, float)
         self.T, self.N = float(T_dock), int(N_dock)
         self.dt = self.T / self.N
@@ -132,7 +134,9 @@ class DockingProblem:
             soft += cp.pos(-(nh @ e))
             soft += cp.pos(cp.norm(v[i] - pv[k]) - self.v0 - self.rate * (nh @ ev))
         soft += cp.norm(r[n] - pr[self.N]) + cp.norm(v[n] - pv[self.N])
-        prob = cp.Problem(cp.Minimize(cp.sum(cp.norm(u, 2, axis=1)) + self.W * soft), cons)
+        cost = (cp.sum_squares(u) if self.objective == "energy"
+                else cp.sum(cp.norm(u, 2, axis=1)))
+        prob = cp.Problem(cp.Minimize(cost + self.W * soft), cons)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             try:

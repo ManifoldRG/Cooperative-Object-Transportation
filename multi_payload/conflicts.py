@@ -8,7 +8,7 @@ separation between time steps (both problems share the time grid).
 Repair takes the worst conflict and displaces the conflicting positions apart
 along their separation direction. Candidate displacements (move j, move l,
 split) are scored by re-solving Step 1 with the displaced position as a
-waypoint, which gives the exact fuel increase: the first-order multiplier of a
+waypoint, which gives the exact cost increase: the first-order multiplier of a
 waypoint placed on the optimal reference is zero, so it carries no
 information. Only the affected payloads are re-solved.
 """
@@ -41,10 +41,11 @@ def zero_eps(sc):
 
 
 def repair(sc, refs, waypoints, eps=None, max_iter=100, push_margin=1.0,
-           psis=None, log=None):
+           psis=None, log=None, objective=None):
     """Repair conflicts in place. Returns (refs, waypoints, log, converged)."""
     psis = psi_list(sc) if psis is None else psis
     eps = zero_eps(sc) if eps is None else eps
+    objective = objective or refs[0].get("objective", "fuel")
     log = [] if log is None else log
     for _ in range(max_iter):
         cf = detect(sc, refs, eps)
@@ -72,12 +73,12 @@ def repair(sc, refs, waypoints, eps=None, max_iter=100, push_margin=1.0,
                     continue
                 w = dict(waypoints[p])
                 w[k] = refs[p]["r"][k] + sgn * amt[p] * n
-                sol = solve_reference(sc, p, w, psis)
+                sol = solve_reference(sc, p, w, psis, objective=objective)
                 if not sol["ok"]:
                     ok = False
                     break
                 new[p] = sol
-                cost += sol["fuel"] - refs[p]["fuel"]
+                cost += sol["cost"] - refs[p]["cost"]
             if ok:
                 scored.append((cost, label, new))
         if not scored:
@@ -86,6 +87,6 @@ def repair(sc, refs, waypoints, eps=None, max_iter=100, push_margin=1.0,
         for p, sol in new.items():
             refs[p] = sol
             waypoints[p] = sol["waypoints"]
-        log.append(dict(pair=(j, l), k=k, gap=gap, choice=label, fuel_increase=cost,
+        log.append(dict(pair=(j, l), k=k, gap=gap, choice=label, cost_increase=cost,
                         options={lab: c for c, lab, _ in scored}))
     return refs, waypoints, log, not detect(sc, refs, eps)

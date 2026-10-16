@@ -5,6 +5,8 @@ Adds, for k = 1..N-1 (the endpoints are pinned),
     ||r_k - rbar_k|| <= eps_k + s_k,   s_k >= 0,
 with the penalty rho * sum_k s_k in the objective (elastic corridor; rho=None
 makes it a hard corridor with s = 0). Optional position waypoints r_k = w.
+objective="fuel" is the paper's sum ||U|| (+ its small L2 term);
+objective="energy" is sum ||U||^2 (the paper's pre-2026-09-07 objective).
 
 Gradient: unchanged. The corridor and waypoint rows do not depend on tau, so
 by the envelope theorem they contribute no explicit term to dJ/dtau; their
@@ -25,7 +27,7 @@ from spacecraft_libraries.new_opts import th_psi_matrix
 
 
 def solve_inner_socp(sys_params, bc, tau, corridor=None, waypoints=None,
-                     solver="CLARABEL", **solver_kwargs):
+                     solver="CLARABEL", objective="fuel", **solver_kwargs):
     """Exact inner SOCP for a fixed tau, with optional corridor.
 
     corridor: dict(rbar (N+1,3), eps (N+1,), rho float|None).
@@ -68,11 +70,18 @@ def solve_inner_socp(sys_params, bc, tau, corridor=None, waypoints=None,
         cons.append(ct)
         torque_cons.append(ct)
         for i in range(A):
-            cons.append(cp.norm(Uk[i], 2) <= t[k * A + i])
+            if objective == "fuel":
+                cons.append(cp.norm(Uk[i], 2) <= t[k * A + i])
             rho_hat = rs_body[i] / np.linalg.norm(rs_body[i])
             cons.append(cosnu * cp.norm(Uk[i], 2) <= -(rho_hat @ Uk[i]))
 
-    objective = cp.sum(t) + FUEL_L2_REG * cp.sum_squares(U)
+    obj_name = objective
+    if objective == "fuel":
+        objective = cp.sum(t) + FUEL_L2_REG * cp.sum_squares(U)
+    elif objective == "energy":
+        objective = cp.sum_squares(U)
+    else:
+        raise ValueError(f"unknown objective {objective!r}")
     s = None
     if corridor is not None:
         rbar = np.asarray(corridor["rbar"], float)
@@ -104,7 +113,9 @@ def solve_inner_socp(sys_params, bc, tau, corridor=None, waypoints=None,
     slack[0] = slack[N] = 0.0
     return dict(
         ok=True, J=float(prob.value),
-        fuel=float(np.linalg.norm(U_v, axis=2).sum()), slack=slack,
+        fuel=float(np.linalg.norm(U_v, axis=2).sum()),
+        cost=float(np.sum(np.linalg.norm(U_v, axis=2) ** (2 if obj_name == "energy" else 1))),
+        slack=slack,
         U=U_v, r=np.asarray(r.value), v=np.asarray(v.value),
         lam_torque=np.asarray([c.dual_value for c in torque_cons]),
         lam_dyn=np.asarray([c.dual_value for c in dyn_cons]),

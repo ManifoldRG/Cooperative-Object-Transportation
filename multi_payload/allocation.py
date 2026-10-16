@@ -1,8 +1,8 @@
 """Allocation: surrogate fuel gamma_j, residual e_j, greedy and MISOCP rules.
 
-With the references fixed, the fuel with which the agents at the occupied
+With the references fixed, the cost with which the agents at the occupied
 points P_j of payload j follow them is the SOCP
-    gamma_j = min sum_{k,p} ||u_pk||
+    gamma_j = min sum_{k,p} ||u_pk||   (or ||u_pk||^2 for objective "energy")
               s.t. sum_p u_pk = R_k^T F_k,  sum_p p x u_pk = tau_k,
                    cos(nu) ||u_pk|| <= -p_hat . u_pk        (exact inward cone)
 (+inf if infeasible). The surrogate J_hat = sum_j gamma_j upper-bounds the
@@ -21,6 +21,8 @@ import warnings
 
 import cvxpy as cp
 import numpy as np
+
+from .translation import cost_expr
 
 RES_TOL = 1e-6
 
@@ -45,10 +47,12 @@ def _bigM(points, W, nu):
     return 100.0 * max(float(np.max(_step_scale(points, W, nu))), 1e-6)
 
 
-def _rho(points, W, nu):
-    """Residual penalty: dominates any fuel difference (exact-penalty regime)
+def _rho(points, W, nu, objective="fuel"):
+    """Residual penalty: dominates any cost difference (exact-penalty regime)
     without the huge coefficients that break the conic solvers."""
-    return 100.0 * max(float(np.sum(_step_scale(points, W, nu))), 1e-6)
+    sc = _step_scale(points, W, nu)
+    total = np.sum(sc ** 2) if objective == "energy" else np.sum(sc)
+    return 100.0 * max(float(total), 1e-6)
 
 
 def _weights(W):
@@ -76,7 +80,8 @@ class PayloadAllocator:
     """gamma_j and e_j of one payload for any subset of its points, solved
     with a single parametric SOCP (occupancy mask as a cvxpy Parameter)."""
 
-    def __init__(self, points, W, nu, solver="CLARABEL"):
+    def __init__(self, points, W, nu, solver="CLARABEL", objective="fuel"):
+        self.objective = objective
         self.points = np.asarray(points, float)
         self.W = np.asarray(W, float)
         self.nu = nu
@@ -92,10 +97,10 @@ class PayloadAllocator:
         for p in range(P):
             for k in range(N):
                 cons.append(cp.norm(self.U[p * N + k]) <= big * self.mask[p])
-        self.fuel = cp.sum(cp.norm(self.U, 2, axis=1))
+        self.fuel = cost_expr(self.U, objective)   # cost under the chosen objective
         self.res = cp.sum(cp.multiply(wts, cp.norm(S, 2, axis=1)))
-        self.prob = cp.Problem(cp.Minimize(self.fuel + _rho(self.points, self.W, nu) * self.res),
-                               cons)
+        self.prob = cp.Problem(cp.Minimize(
+            self.fuel + _rho(self.points, self.W, nu, objective) * self.res), cons)
         self._cache = {}
 
     def evaluate(self, occupied):
@@ -194,7 +199,7 @@ def misocp(allocators, n_agents, solver="MOSEK", time_limit=300.0):
         U.append(Uj)
         S.append(Sj)
         base += cj
-        fuel.append(cp.sum(cp.norm(Uj, 2, axis=1)))
+        fuel.append(cost_expr(Uj, a.objective))
         res.append(cp.sum(cp.multiply(_weights(a.W), cp.norm(Sj, 2, axis=1))))
     total_pts = sum(a.P for a in allocators)
     count = [sum(cp.sum(zj) for zj in z) == min(n_agents, total_pts)]
@@ -221,6 +226,6 @@ def misocp(allocators, n_agents, solver="MOSEK", time_limit=300.0):
                                stage2_value=float(p2.value), mip_case=case))
 
 
-def build_allocators(sc, wrenches, solver="CLARABEL"):
-    return [PayloadAllocator(sc.payloads[j].points, wrenches[j], sc.nu, solver)
+def build_allocators(sc, wrenches, solver="CLARABEL", objective="fuel"):
+    return [PayloadAllocator(sc.payloads[j].points, wrenches[j], sc.nu, solver, objective)
             for j in range(sc.M)]

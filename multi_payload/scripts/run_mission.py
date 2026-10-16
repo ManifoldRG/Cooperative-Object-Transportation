@@ -32,6 +32,8 @@ def main():
     p.add_argument("--tf", type=float, default=None)
     p.add_argument("--allocation", choices=("greedy", "misocp"), default="misocp")
     p.add_argument("--step5", choices=("cgd", "dgd"), default="cgd")
+    p.add_argument("--objective", choices=("fuel", "energy"), default="fuel",
+                   help="sum ||u|| (paper) or sum ||u||^2 (continuous thrust)")
     p.add_argument("--budget", type=float, default=60.0)
     p.add_argument("--dock-time", type=float, default=400.0, help="docking duration [s]")
     p.add_argument("--dock-steps", type=int, default=40)
@@ -54,14 +56,14 @@ def main():
         scenario.save(sc, a.out / "scenario.json")
         print(f"scenario: M={sc.M}, agents={sc.n_agents}, N={sc.N}, tf={sc.tf:.0f} s")
         out = pipeline.run(sc, allocation=a.allocation, step5=a.step5, budget_s=a.budget,
-                           seed=a.seed)
+                           seed=a.seed, objective=a.objective)
         (a.out / "summary.json").write_text(json.dumps(
             pipeline.summary(sc, out), indent=1, default=lambda o: o.tolist()
             if hasattr(o, "tolist") else str(o)))
         plots.all_figures(sc, out, a.out)
 
         starts = docking.agent_starts(sc, seed=a.seed)
-        dock_kw = dict(T_dock=a.dock_time, N_dock=a.dock_steps)
+        dock_kw = dict(T_dock=a.dock_time, N_dock=a.dock_steps, objective=a.objective)
         dp = docking.DockingProblem(sc, starts, **dock_kw)
         asg, _ = docking.assign(dp, out["allocation"]["occupied"])
         dock = docking.simulate(dp, asg, noise=a.dock_noise, seed=a.seed)

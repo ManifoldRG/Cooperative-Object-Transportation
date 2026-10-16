@@ -124,3 +124,11 @@ def test_docking_captures_all_agents():
     assert sorted(asg) == [(0, 0), (0, 1), (1, 0), (1, 1)]
     sim = docking.simulate(dp, asg, noise=0.02, seed=1)
     assert sim["all_captured"]
+
+
+def test_pipeline_end_to_end_energy_objective():
+    sc = _small(M=2, points=4, agents=6, seed=5)
+    out = pipeline.run(sc, budget_s=10, max_restarts=1, verbose=False, objective="energy")
+    v = out["verify"]
+    assert out["status"] == "ok" and v["objective"] == "energy"
+    assert v["collision_free"] and v["all_terminal_ok"] and v["certificate_ok"]

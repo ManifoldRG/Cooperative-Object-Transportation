@@ -10,7 +10,9 @@ size with backtracking), with three changes:
   * initial_tau seeds the first start (and island 0 of the decentralized
     variant), so the oracle starts from the allocation's attitude reference;
   * the best inner solution is kept as a dict (fuel, slack, U, r, v) instead
-    of the packed IPOPT vector.
+    of the packed IPOPT vector;
+  * objective="fuel" (paper) or "energy" (sum ||U||^2) for the inner SOCP.
+    The envelope gradient is unchanged: the objective does not depend on tau.
 """
 from __future__ import annotations
 
@@ -31,6 +33,7 @@ def solve_centralized_gd(
     epsilon: float,
     corridor=None,
     waypoints=None,
+    objective: str = "fuel",
     seed: int = 42,
     tau_init_scale: float = 0.1,
     rel_step: float = 0.03,
@@ -59,7 +62,7 @@ def solve_centralized_gd(
     def inner(tau):
         history['n_inner'] += 1
         return solve_inner_socp(sys_params, bc, tau, corridor=corridor,
-                                waypoints=waypoints)
+                                waypoints=waypoints, objective=objective)
 
     def _descend(start_tau=None):
         oracle.reset_warm()
@@ -142,6 +145,7 @@ def _package(method, tau, J, sol, runtime, history, n_starts):
         'v': sol['v'],
         'cost': float(J),
         'fuel': sol['fuel'],
+        'objective_cost': sol['cost'],
         'slack': sol['slack'],
         'runtime': runtime,
         'gd': {
@@ -157,10 +161,12 @@ def _package(method, tau, J, sol, runtime, history, n_starts):
 
 def _island_worker(packed):
     (i, sys_params, bc, epsilon, corridor, waypoints, seed, tau_init_scale,
-     rel_step, max_runtime_s, max_restarts, init_tau, random_restart_scale) = packed
+     rel_step, max_runtime_s, max_restarts, init_tau, random_restart_scale,
+     objective) = packed
     try:
         return i, solve_centralized_gd(
             sys_params, bc, epsilon, corridor=corridor, waypoints=waypoints,
+            objective=objective,
             seed=seed, tau_init_scale=tau_init_scale, rel_step=rel_step,
             max_runtime_s=max_runtime_s, restarts=max_restarts != 1,
             max_restarts=max_restarts, initial_tau=init_tau,
@@ -175,6 +181,7 @@ def solve_decentralized_gd(
     epsilon: float,
     corridor=None,
     waypoints=None,
+    objective: str = "fuel",
     base_seed: int = 42,
     tau_init_scale: float = 0.1,
     rel_step: float = 0.03,
@@ -219,7 +226,7 @@ def solve_decentralized_gd(
         import os
         jobs = [(i, sys_params, bc, epsilon, corridor, waypoints, base_seed + i,
                  tau_init_scale, rel_step, max_runtime_s, max_restarts_per_island,
-                 init_tau(i), random_restart_scale) for i in range(A)]
+                 init_tau(i), random_restart_scale, objective) for i in range(A)]
         with cf.ProcessPoolExecutor(max_workers=min(A, max(1, (os.cpu_count() or 2) - 1))) as pool:
             for i, res in pool.map(_island_worker, jobs):
                 if res is not None:
@@ -234,7 +241,7 @@ def solve_decentralized_gd(
             i_, res = _island_worker((i, sys_params, bc, epsilon, corridor, waypoints,
                                       base_seed + i, tau_init_scale, rel_step, remaining,
                                       max_restarts_per_island, init_tau(i),
-                                      random_restart_scale))
+                                      random_restart_scale, objective))
             if res is not None:
                 costs[i], results[i] = res['cost'], res
 

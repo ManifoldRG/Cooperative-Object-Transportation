@@ -8,6 +8,8 @@ from scipy.spatial.transform import Rotation
 
 from spacecraft_libraries.new_opts import state_attitude_to_phi, th_psi_matrix
 
+from .translation import cost_value
+
 
 def rollout(sys_params, bc, U):
     """Returns dict(r (N+1,3), fuel, V) for controls U (agents, N, 3) in the
@@ -33,12 +35,13 @@ def rollout(sys_params, bc, U):
         r = r_new
         rh.append(r.copy())
         if not (np.isfinite(r).all() and np.isfinite(v).all() and np.isfinite(w).all()):
-            return dict(r=np.asarray(rh), fuel=float("nan"), V=float("inf"))
+            return dict(r=np.asarray(rh), fuel=float("nan"), energy=float("nan"), V=float("inf"))
     Rf = Rotation.from_rotvec(state_attitude_to_phi(bc.xf)).as_matrix()
     att = np.linalg.norm(Rotation.from_matrix(R.T @ Rf).as_rotvec())
     V = (np.linalg.norm(r - bc.xf.r) + np.linalg.norm(v - bc.xf.v) + att
          + np.linalg.norm(w - bc.xf.omega))
-    return dict(r=np.asarray(rh), fuel=float(np.linalg.norm(U, axis=2).sum()), V=float(V))
+    return dict(r=np.asarray(rh), fuel=cost_value(U, "fuel"), energy=cost_value(U, "energy"),
+                V=float(V))
 
 
 def min_separation(paths, substeps=10):
@@ -57,18 +60,23 @@ def min_separation(paths, substeps=10):
     return best
 
 
-def verify(sc, occupied, oracle_out, lower_bound, J_hat, V_tol=1e-6):
+def verify(sc, occupied, oracle_out, lower_bound, J_hat, V_tol=1e-6, objective="fuel"):
+    """Certificate in the units of the objective: lower_bound <= J_final <= J_hat."""
     payloads = []
     paths = []
     for j, res in enumerate(oracle_out["payloads"]):
         sp, bc = sc.sys_params_for(j, occupied[j])
         ro = rollout(sp, bc, res["control"])
         paths.append(ro["r"])
-        payloads.append(dict(fuel=ro["fuel"], V=ro["V"], max_slack=float(res["slack"].max())))
+        payloads.append(dict(fuel=ro["fuel"], energy=ro["energy"], V=ro["V"],
+                             max_slack=float(res["slack"].max())))
     dmin, where = min_separation(paths)
-    J_final = float(sum(p["fuel"] for p in payloads))
+    J_final = float(sum(p[objective] for p in payloads))
     return dict(
-        payloads=payloads, J_final=J_final, lower_bound=float(lower_bound),
+        payloads=payloads, objective=objective, J_final=J_final,
+        total_fuel=float(sum(p["fuel"] for p in payloads)),
+        total_energy=float(sum(p["energy"] for p in payloads)),
+        lower_bound=float(lower_bound),
         J_hat=float(J_hat), min_separation=dmin, min_separation_at=where,
         delta=sc.delta, collision_free=bool(dmin >= sc.delta),
         all_terminal_ok=bool(all(p["V"] < V_tol for p in payloads)),
