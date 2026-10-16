@@ -132,3 +132,97 @@ def test_pipeline_end_to_end_energy_objective():
     v = out["verify"]
     assert out["status"] == "ok" and v["objective"] == "energy"
     assert v["collision_free"] and v["all_terminal_ok"] and v["certificate_ok"]
+
+
+def test_push_length_clears_required_separation():
+    rng = np.random.default_rng(0)
+    for _ in range(50):
+        D = rng.normal(0, 20, 3)
+        need = np.linalg.norm(D) + rng.uniform(1, 50)
+        n = D / np.linalg.norm(D)
+        for d in conflicts.push_directions(n):
+            a = conflicts.push_length(D, d, need)
+            assert a >= 0 and abs(np.linalg.norm(D + a * d) - need) < 1e-6
+
+
+def test_repair_direction_search_and_stats():
+    sc = _small(M=3, seed=2)
+    refs = translation.solve_all(sc)
+    eps = conflicts.zero_eps(sc)
+    refs, wps, log, ok = conflicts.repair(sc, refs, [dict() for _ in range(sc.M)], eps)
+    st = conflicts.repair_stats(log, ok)
+    assert ok and st["converged"] and not st["oscillation"] and st["iterations"] == len(log)
+    assert all(e["n_options"] >= 3 for e in log)
+    # max_iter=0 cannot repair: reported as not converged
+    refs2 = translation.solve_all(sc)
+    _, _, log2, ok2 = conflicts.repair(sc, refs2, [dict() for _ in range(sc.M)], eps, max_iter=0)
+    assert not ok2 and conflicts.repair_stats(log2, ok2)["iterations"] == 0
+
+
+def test_repair_stats_flags_oscillation():
+    log = [dict(pair=(0, 1), k=5, recurrence=1), dict(pair=(0, 1), k=5, recurrence=2)]
+    assert conflicts.repair_stats(log, False)["oscillation"]
+    assert not conflicts.repair_stats(log, True)["oscillation"]
+
+
+def _stub_result(sc, slack_value):
+    s = np.zeros(sc.N + 1)
+    s[1:-1] = slack_value
+    return dict(control=np.zeros((1, sc.N, 3)), tau=np.zeros((sc.N, 3)), r=None,
+                fuel=1.0, objective_cost=1.0, cost=1.0, slack=s)
+
+
+def test_oracle_expands_corridor_then_succeeds(monkeypatch):
+    from multi_payload import oracle as orc_mod
+    sc = _small(M=2)
+    refs = translation.solve_all(sc)
+    calls = []
+
+    def fake(sc_, j, occ, ref, tau, eps_j, rho, *a, **k):
+        calls.append((j, float(eps_j.max())))
+        return _stub_result(sc_, 2.0 if eps_j.max() < 1.0 else 0.0)
+
+    monkeypatch.setattr(orc_mod, "solve_payload", fake)
+    out = orc_mod.run_oracle(sc, refs, [dict(), dict()], [[0], [0]], [None, None],
+                             conflicts.zero_eps(sc))
+    assert out["status"] == "ok"
+    assert any(e > 0 for _, e in calls), "corridor should have been widened"
+
+
+def test_oracle_falls_back_to_re_repair_when_no_room(monkeypatch):
+    from multi_payload import oracle as orc_mod
+    sc = _small(M=2)
+    refs = translation.solve_all(sc)
+    refs, wps, _, _ = conflicts.repair(sc, refs, [dict(), dict()], conflicts.zero_eps(sc))
+    big = 1e4   # slack that no corridor can absorb -> re-repair, then give up
+    monkeypatch.setattr(orc_mod, "solve_payload",
+                        lambda sc_, *a, **k: _stub_result(sc_, big if k.get("corridor", True) else 0.0))
+    out = orc_mod.run_oracle(sc, refs, wps, [[0], [0]], [None, None],
+                             conflicts.zero_eps(sc), max_outer=1)
+    assert any("repair" in e for e in out["log"]), "should fall back to re-repair"
+    assert out["status"] in ("slack", "ok")
+
+
+def test_harness_runs_waypoint_oracle():
+    from multi_payload import harness
+    row = harness.run_task(dict(layout="crossing", M=2, points=4, agents=6, nu=60, seed=5,
+                                oracle="waypoint", allocation="greedy", objective="fuel",
+                                budget=10, N=10, tf=300,
+                                oracle_kwargs=dict(max_restarts=1)))
+    assert row["status"] == "ok", row.get("error")
+    assert row["success"] and row["certificate_ok"]
+    assert row["info_repair_converged"]
+
+
+def test_oracle_reports_infeasible_instead_of_crashing(monkeypatch):
+    from multi_payload import oracle as orc_mod
+
+    def always_fails(*a, **k):
+        raise RuntimeError("gradient descent: every start failed to produce a finite cost")
+
+    sc = _small(M=2)
+    refs = translation.solve_all(sc)
+    monkeypatch.setattr(orc_mod, "solve_payload", always_fails)
+    out = orc_mod.run_oracle(sc, refs, [dict(), dict()], [[0], [0]], [None, None],
+                             conflicts.zero_eps(sc))
+    assert out["status"] == "infeasible" and "payload 0" in out["reason"]

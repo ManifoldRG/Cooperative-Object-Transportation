@@ -171,3 +171,4 @@ agents/ui_agent/weights
 external_data/
 # multi_payload run caches
 multi_payload/results/**/cache.pkl
+multi_payload/results/**/tasks/

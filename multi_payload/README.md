@@ -19,9 +19,12 @@ cones of half-angle ν, fuel Σ‖u‖, and independent rollout verification.
    their total fuel is a lower bound on the optimum.
 2. **Conflict detection** (`conflicts.py`). Pairs closer than
    δ + ε_j + ε_l + (Δt/2)‖Δv‖ at any step.
-3. **Waypoint repair** (`conflicts.py`). The worst conflict is pushed apart (move j,
-   move l, or split), each option scored by re-solving step 1 with the displaced
-   position as a waypoint; only the affected payloads are re-solved.
+3. **Waypoint repair** (`conflicts.py`). The worst conflict is pushed apart. Candidates
+   are 5 push directions (the separation axis and four 45° tilts) × 3 splits (move j,
+   move l, half each), each pushed exactly far enough; the cheapest by exact re-solve
+   of step 1 is applied, re-solving only the affected payloads. Recurring conflicts get
+   a geometrically growing push margin (anti-oscillation); convergence, iterations and
+   recurrences are reported.
 4. **Ball corridors** (`oracle.py`). ‖r_k − r̄_k‖ ≤ ε_k decouples the payloads.
 5. **Single-payload 6-DoF solves** (`gd_corridor.py`, `socp_corridor.py`). Modified
    copies of the paper's COT solver: the corridor sits in the convex inner SOCP and the
@@ -68,6 +71,48 @@ agent–agent distance is reported.
 docking, transport) in the style of the eight-agent demo, driven by the computed
 trajectories, with a camera that smoothly zooms to frame the active objects.
 Geometry is to scale.
+
+## Comparing oracle methods
+
+`oracles.py` defines the interface every Oracle-Problem method implements: given a
+scenario and a fixed allocation (`OracleProblem`), return each payload's body-frame
+agent thrusts and torque trajectory (`OracleResult`). The waypoint-repair method is
+registered as `"waypoint"`. A new method (e.g. the fused GCS + gate-scheduling
+planner) implements `solve(prob)` and calls `register("gcs", GCSOracle)`.
+
+`harness.py` computes one allocation per scenario (shared by all methods) and scores
+every method with the same independent verification. `benchmark/` runs grids of
+scenarios × methods, one subprocess per task, resume-safe with a per-task timeout:
+
+```bash
+py multi_payload/benchmark/driver.py --out multi_payload/results/bench --M 3 4 5 6 \
+   --layouts crossing random --nus 15 60 --seeds 0 1 --oracles waypoint gcs --workers 4
+py multi_payload/benchmark/analyze.py multi_payload/results/bench/results.csv --by oracle M
+```
+
+The summary reports per method: success (collision-free and terminal state reached),
+repair convergence, iterations and recurrences, corridor expansions and re-repairs,
+minimum separation / δ, terminal error, certified gap J_final / lower bound,
+certificate, and runtime.
+
+### Stress test of the waypoint-repair oracle (2026-10-16)
+
+`results/bench_stress` (3 agents per payload) and `results/bench_scarce` (2 per
+payload): M = 3–6 payloads, crossing and random layouts, ν = 15° and 60°, 2 seeds,
+N = 30, C-GD with 30 s per payload, greedy allocation. 48 tasks in total.
+
+- **Repair convergence (the known risk): 48/48 converged** in 0–2 iterations, with
+  no recurring conflicts and no oscillation.
+- **ν = 60°, 3 agents/payload: 16/16 succeed:** collision-free (minimum separation
+  ≥ 1.10 δ), terminal error ≈ 0, certified gap J_final / lower bound median 1.44.
+- **Fallbacks used in real runs:** 35 corridor expansions; every run that needed them
+  and was feasible succeeded.
+- **Infeasible cases are reported, not crashed:** ν = 15° with 3 agents (12/16), and
+  most 2-agent cases. Here the allocation cannot produce the required wrenches
+  (allocation residual > 0), so the Oracle's sufficiency assumption fails. These
+  verdicts are local, since the COT torque search is non-convex.
+- The re-repair fallback (Step 6 back to Step 3) was not needed in any real run;
+  it is covered by a unit test with a stubbed solver.
 
 ## Run
 

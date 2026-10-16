@@ -51,6 +51,17 @@ def solve_payload(sc, j, occupied, ref, tau_ref, eps_j, rho, method="cgd",
                                 **common)
 
 
+def _feasible_without_corridor(sc, j, occupied, refs, tau_refs, eps, rho, method,
+                               budget_s, seed, max_restarts, objective):
+    try:
+        free = solve_payload(sc, j, occupied[j], refs[j], tau_refs[j], eps[j], rho,
+                             method, budget_s, seed, max_restarts, corridor=False,
+                             objective=objective)
+        return bool(np.isfinite(free["cost"]))
+    except RuntimeError:
+        return False
+
+
 def run_oracle(sc, refs, waypoints, occupied, tau_refs, eps, rho=1e3,
                method="cgd", budget_s=60.0, seed=0, max_restarts=None,
                slack_tol=1e-3, expand_margin=1.0, max_expand=3, max_outer=3,
@@ -66,8 +77,23 @@ def run_oracle(sc, refs, waypoints, occupied, tau_refs, eps, rho=1e3,
         need_room = {}
         for j in sorted(todo):
             for it in range(max_expand + 1):
-                res = solve_payload(sc, j, occupied[j], refs[j], tau_refs[j], eps[j], rho,
-                                    method, budget_s, seed, max_restarts, objective=objective)
+                try:
+                    res = solve_payload(sc, j, occupied[j], refs[j], tau_refs[j], eps[j], rho,
+                                        method, budget_s, seed, max_restarts, objective=objective)
+                except RuntimeError as exc:
+                    # every torque start gave an infeasible inner problem. The
+                    # elastic corridor cannot cause this; confirm without it.
+                    log.append(dict(outer=outer, payload=j, attempt=it, error=str(exc)))
+                    if _feasible_without_corridor(sc, j, occupied, refs, tau_refs, eps, rho,
+                                                  method, budget_s, seed, max_restarts,
+                                                  objective):
+                        need_room[j] = eps[j] + expand_margin
+                        break
+                    say(f"  payload {j}: infeasible for this allocation ({exc})")
+                    return dict(status="infeasible", payloads=results, refs=refs,
+                                waypoints=waypoints, eps=eps, log=log,
+                                reason=f"payload {j}: inner problem infeasible for every "
+                                       f"torque start, with and without corridor")
                 s = res["slack"]
                 log.append(dict(outer=outer, payload=j, attempt=it, fuel=res["fuel"],
                                 cost=res["objective_cost"],
@@ -93,25 +119,32 @@ def run_oracle(sc, refs, waypoints, occupied, tau_refs, eps, rho=1e3,
             break
         # Step 6 fallback: is the payload feasible at all without a corridor?
         for j in list(need_room):
-            try:
-                free = solve_payload(sc, j, occupied[j], refs[j], tau_refs[j], eps[j], rho,
-                                     method, budget_s, seed, max_restarts, corridor=False,
-                                     objective=objective)
-                feasible = np.isfinite(free["cost"])
-            except RuntimeError:
-                feasible = False
-            if not feasible:
+            if not _feasible_without_corridor(sc, j, occupied, refs, tau_refs, eps, rho,
+                                              method, budget_s, seed, max_restarts, objective):
                 return dict(status="infeasible", payloads=results, refs=refs,
                             waypoints=waypoints, eps=eps, log=log)
         # back to Step 3: repair with the larger radii to make room
+        eps_used = [e.copy() for e in eps]
         for j, want in need_room.items():
             eps[j] = np.maximum(eps[j], want)
             eps[j][0] = eps[j][-1] = 0.0
         before = [r["r"].copy() for r in refs]
-        refs, waypoints, rlog, ok = repair(sc, refs, waypoints, eps, psis=psis,
-                                           objective=objective)
+        try:
+            refs, waypoints, rlog, ok = repair(sc, refs, waypoints, eps, psis=psis,
+                                               objective=objective)
+        except (RuntimeError, ValueError) as exc:
+            # the requested room cannot be made (e.g. it reaches the boundary
+            # conditions): keep the best solutions found, report the slack
+            log.append(dict(outer=outer, repair=[], converged=False, error=str(exc)))
+            say(f"  re-repair failed: {exc}")
+            eps = eps_used          # radii the returned solutions were planned with
+            status = "slack"
+            break
         log.append(dict(outer=outer, repair=rlog, converged=ok))
         say(f"  re-repair with larger corridors: {len(rlog)} waypoint(s), converged={ok}")
+        if not ok:
+            status = "slack"
+            break
         todo = {j for j in range(sc.M)
                 if j in need_room or not np.allclose(before[j], refs[j]["r"])}
     return dict(status=status, payloads=results, refs=refs, waypoints=waypoints,

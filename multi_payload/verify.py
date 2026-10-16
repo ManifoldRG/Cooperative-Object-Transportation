@@ -68,8 +68,9 @@ def verify(sc, occupied, oracle_out, lower_bound, J_hat, V_tol=1e-6, objective="
         sp, bc = sc.sys_params_for(j, occupied[j])
         ro = rollout(sp, bc, res["control"])
         paths.append(ro["r"])
+        slack = res.get("slack")
         payloads.append(dict(fuel=ro["fuel"], energy=ro["energy"], V=ro["V"],
-                             max_slack=float(res["slack"].max())))
+                             max_slack=float(np.max(slack)) if slack is not None else 0.0))
     dmin, where = min_separation(paths)
     J_final = float(sum(p[objective] for p in payloads))
     return dict(
