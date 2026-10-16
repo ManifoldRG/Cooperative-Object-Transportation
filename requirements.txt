@@ -1,0 +1,11 @@
+numpy>=2.0
+scipy>=1.13
+casadi>=3.6
+cvxpy>=1.5
+clarabel
+pandas>=2.0
+matplotlib>=3.8
+networkx>=3.0
+pygad>=3.0
+tqdm
+pytest

@@ -1,45 +1,125 @@
 # Cooperative Object Transportation
+
 > **Project Type:** Research
 
-##  About • Goal • Vision
-Implementation of Parallel Island Model Genetic Algorithm for $N$ Spacecraft agents to cooperatively manipulate a Rigid Payload from a starting position to a final state in a decentralised manner while minimising total costs
+This repository contains the code for the paper
 
-**Goal**: Implement the algorithm and decentralised control process 
+> **Decentralized Bi-Level Optimization for Cooperative Orbital Transportation of a Rigid Payload**
+> Sidhdharth D. Sikka, Revathy Ravuri, Hei Yin Jowett Chan, Tim Echtermeyer, Shaoshuai Mou.
+> Submitted to *IEEE Transactions on Aerospace and Electronic Systems*, 2026 (under review).
 
-**Vision**: Provide foundation for decentralised cooperative object manipulation in space.
+The `main` branch matches the paper. It extends the earlier centralized method of
+Sikka et al., *On Orbit Object Transportation With Spacecraft Swarms*, AIAA SciTech 2025.
 
-## Project Roadmap
+## What it does
+
+A swarm of $N$ spacecraft is rigidly attached to a payload and must move it from an
+initial to a final position and attitude in a relative orbital (Hill) frame while
+minimizing total fuel, $\sum_{i,k}\|\boldsymbol{u}_{i,k}\|$. Each agent can only push
+inward, within a thrust cone of half-angle $\nu$ about its attachment direction.
+
+The problem is non-convex because the thrusts couple to the payload's rotation. It is
+split into two levels:
+
+- **Inner problem (convex).** For a fixed body-frame torque trajectory, the attitude
+  is rolled out and the minimum-fuel thrust allocation is an exact second-order cone
+  program (`spacecraft_libraries/solvers/socp_inner.py`, solved with CLARABEL).
+- **Outer problem.** Search over torque trajectories. The paper's method uses the
+  exact envelope-theorem gradient of the inner optimal value (from the SOCP duals and
+  an adjoint pass through the attitude dynamics) inside projected gradient descent
+  with random restarts.
+
+Decentralization: each agent runs its own restart stream from its own seeds, and a
+max-consensus round over a line-of-sight graph shares the swarm-wide best trajectory.
+A closed-loop mode detects in-flight actuation and communication faults, detumbles the
+payload, removes failed agents and replans with the survivors.
+
+## Methods
+
+| Paper name | Code | Function |
+|---|---|---|
+| D-GD (ours) | `decentralized_gd` | `solvers.gradient_descent.solve_decentralized_gd` |
+| C-GD (ours) | `centralized_gd` | `solvers.gradient_descent.solve_centralized_gd` |
+| Direct NLP | `centralized_nlp_th` | `solvers.centralized_nlp_th.solve_centralized_nlp_th` |
+| GA (prior method) | `centralized_ga` | `solvers.centralized_ga.solve_centralized_ga` |
+| C-MPPI / D-MPPI | `centralized_mppi` / `decentralized_mppi` | `solvers.centralized_mppi`, `solvers.decentralized_mppi` |
+
+`solvers/greedy_sampler.py` (GS) and `solvers/decentralized_island_ga.py` are kept for
+comparison but are not part of the paper's results. `solvers/centralized_nlp.py`
+(`og_opts.full_nlp`) uses different physics and is superseded by `centralized_nlp_th`.
+
+## Installation
+
+Python 3.11 or newer.
+
+```bash
+pip install -r requirements.txt
 ```
-1. Implement the agent and payload dynamics
-1. Animate the motion of the agent and the payload for better visualisation
-2. Implement inner control optimisation code
-2. Test with Deterministic cases and known scenarios
-3. Implement Parallel Island Model
-3. Write blog post about the implementation
-4. Implement the communication layer and consensus
-5. Compare with prior centralised approach and NLP benchmarks
-6. Perform parametric sensitivity studies
-7. Provide Analytical guarantee of Genetic Diversity
+
+CLARABEL is installed with cvxpy. IPOPT ships with CasADi.
+
+## Quick start
+
+Generate one scenario with a 60° thrust cone, then solve it with D-GD:
+
+```bash
+python scripts/csf/generate_scenarios.py --n 1 --thrust-angles-deg 60 --seed 1 --output results/quick/scenarios.json
+python scripts/run_gd_local.py --scenarios results/quick/scenarios.json --output-dir results/quick/gd --time-limit 60 --decentralized
 ```
 
-How to Contribute
-Contributor workflow
+Each scenario writes one CSV row with the fuel cost (`cost`), the terminal violation
+and the runtime. Drop `--decentralized` to run C-GD.
 
-```markdown
-1. Fork → `feat/` branch  
-2. Pass tests: `pytest tests/`  
-3. Update [CONTRIBUTING.md](CONTRIBUTING.md)
-📜 License & Attribution
-(Mandatory section)
-Citation:
+Run the tests (about one minute):
 
-bibtex
-@software{Manifold_UrbanGeo_2025,
-  author = {Manifold Research Group},
-  title = {{ProjectName}: Geospatial analysis toolkit},
-  url = {https://github.com/ManifoldRG/project},
-  version = {0.1.0},
-  year = {2025}
+```bash
+pytest tests
+```
+
+## Reproducing the paper
+
+| Experiment | Entry point |
+|---|---|
+| Baseline comparison (all methods × cone angles × time budgets), local | `scripts/run_baseline_local.py` |
+| Baseline comparison on the CSF cluster (SLURM) | `scripts/csf/baseline_comparison.py`, `scripts/csf/baseline_submit.sh` |
+| Fuel-objective campaign with independent rollout verification | `scripts/baseline_fuel/driver.py` (see its docstring for `WORKERS`, `BUDGETS`, `METHODS`) |
+| Tables and figures from a campaign CSV | `python scripts/baseline_fuel/analyze.py <results.csv> [outdir]` |
+| Scalability in the number of agents, open and closed loop (D-GD) | `scripts/csf/run_mc_scalability_dgd_csf.py`, launched by `scripts/csf/submit_scalability_openloop.sh` and `submit_scalability_closed_loop.sh` |
+| Closed-loop fault recovery | `scripts/run_recovery_sim.py` (e.g. `--scenario 1 --fault 2:25.0:both`) |
+| Merging per-task CSVs from cluster runs | `scripts/csf/merge_tasks.py` |
+
+Every campaign script re-simulates the returned controls through the discrete
+dynamics and records the terminal violation, so reported fuel always belongs to a
+verified trajectory. The scenarios used in the paper are in
+`CSF Runs/results_20260823/baseline_large_20_scenarios_th.csv`.
+
+## Repository layout
+
+```
+spacecraft_libraries/
+  solvers/        all solvers in the table above, the SOCP inner problem and its gradient
+  closed_loop/    fault injection, detection, detumble and replanning simulation
+  graph/          line-of-sight communication graph and max-consensus
+  evaluation/     scenario generator and comparison harness
+  new_opts.py     dynamics, attitude projection and inner-problem utilities
+scripts/          experiment drivers (local and CSF/SLURM)
+CSF Runs/         campaign results and scenario sets
+tests/            closed-loop and MPPI tests
+```
+
+## Citation
+
+```bibtex
+@inproceedings{sikka_orbit_2025,
+  title     = {On Orbit Object Transportation With Spacecraft Swarms},
+  author    = {Sikka, Sidhdharth D. and Lu, Zehui and Rai, Ayush and DeLaurentis, Daniel and Mou, Shaoshuai},
+  booktitle = {AIAA SciTech 2025 Forum},
+  year      = {2025}
 }
-License: MIT
-Acknowledgements: NSF Award #203445 • City of Seattle Open Data Portal
+```
+
+A citation for the decentralized bi-level paper will be added once it is published.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
