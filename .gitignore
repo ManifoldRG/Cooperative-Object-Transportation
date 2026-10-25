@@ -1,4 +1,4 @@
-# Byte-compiled / optimized / DLL files
+﻿# Byte-compiled / optimized / DLL files
 __pycache__
 *.py[cod]
 *$py.class
@@ -174,4 +174,5 @@ multi_payload/results/**/cache.pkl
 multi_payload/results/**/tasks/
 
 # study outputs (regenerate with the scripts)
-studies/**/results/
+multi_payload/studies/results/
+
