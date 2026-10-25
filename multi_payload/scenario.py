@@ -160,6 +160,26 @@ def generate(layout: str = "crossing", M: int = 3, n_points: int = 6,
                     return pts
             raise RuntimeError("could not place payloads: enlarge ring_radius")
         starts, goals = draw_set(), draw_set()
+    elif layout == "random_seq":
+        # sequential (dart-throwing) placement: same uniform-in-ball target
+        # distribution thinned by the separation, but each point is accepted
+        # or redrawn on its own, so dense sets that defeat the all-pairs
+        # rejection draw above still place reliably.
+        def draw_set():
+            pts = []
+            for _ in range(M):
+                for _ in range(max_tries):
+                    p = np_rng.uniform(-1, 1, 3) * ring_radius
+                    if np.linalg.norm(p) > ring_radius:
+                        continue
+                    if all(np.linalg.norm(p - q) >= sep for q in pts):
+                        pts.append(p)
+                        break
+                else:
+                    raise RuntimeError(
+                        "could not place payloads: enlarge ring_radius")
+            return pts
+        starts, goals = draw_set(), draw_set()
     else:
         raise ValueError(f"unknown layout {layout!r}")
 

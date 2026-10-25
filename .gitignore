@@ -172,3 +172,6 @@ external_data/
 # multi_payload run caches
 multi_payload/results/**/cache.pkl
 multi_payload/results/**/tasks/
+
+# study outputs (regenerate with the scripts)
+studies/**/results/
