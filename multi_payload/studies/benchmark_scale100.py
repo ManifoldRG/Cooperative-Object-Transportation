@@ -100,7 +100,9 @@ def planes_pruned(sc, psis, pairs, x, deltas):
 
 def run_instance(M, seed, N, tf, headroom=60.0):
     ring = 500.0 * max(1.0, M / 20.0) ** (1.0 / 3.0)
-    sc = scenario.generate("random", M=M, n_points=8, n_agents=3 * M,
+    # random_seq = dart-throwing placement: the all-pairs rejection draw of
+    # the legacy "random" layout stops finding placements around M >= 70
+    sc = scenario.generate("random_seq", M=M, n_points=8, n_agents=3 * M,
                            seed=seed, nu_deg=60, N=N, tf=tf,
                            ring_radius=ring, max_tries=5000)
     psis = translation.psi_list(sc)
