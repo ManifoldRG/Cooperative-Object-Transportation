@@ -32,15 +32,51 @@ import route2_multi as r2  # noqa: E402
 CAP = 150.0
 
 
-def tubes_detail(sc, psis, pairs, deltas, x, N, M):
+def waterfill_radii(x, deltas, N, M):
+    """Uniform ball growth with freeze-on-contact, per timestep: the
+    lexicographic-maximin allocation of the pairwise surpluses. Dominates the
+    half-split radii pointwise (a ball at its half-split level has violated
+    nothing, so growth never stops below it)."""
+    eps = np.full((M, N + 1), CAP)
+    for k in range(N + 1):
+        S = np.full((M, M), np.inf)
+        for j in range(M):
+            for l in range(j + 1, M):
+                S[j, l] = S[l, j] = (np.linalg.norm(x[j][k] - x[l][k])
+                                     - deltas[j][l])
+        r = np.zeros(M)
+        active = np.ones(M, bool)
+        while active.any():
+            # next freeze: min over constraints involving an active ball
+            t_best, who = np.inf, None
+            for j in np.nonzero(active)[0]:
+                tj = CAP - r[j]
+                for l in range(M):
+                    if l == j:
+                        continue
+                    slack = S[j, l] - r[j] - r[l]
+                    tj = min(tj, slack / 2 if active[l] else slack)
+                if tj < t_best:
+                    t_best, who = tj, j
+            r[active] += max(0.0, t_best)
+            active[who] = False
+        eps[:, k] = np.minimum(r, CAP)
+    return eps
+
+
+def tubes_detail(sc, psis, pairs, deltas, x, N, M, alloc="half"):
     """Decoupled tube SOCPs. Returns (fuel, rs, t_each) or (None, j, None)."""
     fuel, rs, t_each = 0.0, [], []
+    wf = waterfill_radii(x, deltas, N, M) if alloc == "maximal" else None
     for j in range(M):
-        e = np.full(N + 1, CAP)
-        for l in range(M):
-            if l != j:
-                e = np.minimum(e, 0.5 * (np.linalg.norm(x[j] - x[l], axis=1)
-                                         - deltas[j][l]))
+        if wf is not None:
+            e = wf[j]
+        else:
+            e = np.full(N + 1, CAP)
+            for l in range(M):
+                if l != j:
+                    e = np.minimum(e, 0.5 * (np.linalg.norm(x[j] - x[l], axis=1)
+                                             - deltas[j][l]))
         t0 = time.perf_counter()
         r = cp.Variable((N + 1, 3))
         v = cp.Variable((N + 1, 3))
@@ -62,7 +98,8 @@ def tubes_detail(sc, psis, pairs, deltas, x, N, M):
     return fuel, rs, t_each
 
 
-def run_instance(M, seed, N, tf, layout="random", profile="gauss"):
+def run_instance(M, seed, N, tf, layout="random", profile="gauss",
+                 alloc="half"):
     ring = 500.0 * max(1.0, M / 20.0) ** (1.0 / 3.0)
     if layout == "random_seq":
         # dart-throwing placement: exact constant-density ring, no auto-grow
@@ -110,7 +147,8 @@ def run_instance(M, seed, N, tf, layout="random", profile="gauss"):
             row["status"] = f"relax stalled (resid {resid:.2f})"
             return row
         t0 = time.perf_counter()
-        fuel, rs, t_each = tubes_detail(sc, psis, pairs, deltas, x, N, M)
+        fuel, rs, t_each = tubes_detail(sc, psis, pairs, deltas, x, N, M,
+                                        alloc=alloc)
         t_tubes = time.perf_counter() - t0
         if fuel is not None:
             break
@@ -138,6 +176,9 @@ def main():
     ap.add_argument("--tf", type=float, default=500.0)
     ap.add_argument("--layout", default="random")
     ap.add_argument("--profile", default="gauss")
+    ap.add_argument("--alloc", default="half",
+                    help="tube radii: 'half' (half-split) or 'maximal' "
+                         "(uniform growth to contact, water-filling)")
     ap.add_argument("--out", default="benchmark_tubes.json")
     a = ap.parse_args()
     rows = []
@@ -145,7 +186,7 @@ def main():
         for s in a.seeds:
             try:
                 row = run_instance(M, s, a.N, a.tf, layout=a.layout,
-                                   profile=a.profile)
+                                   profile=a.profile, alloc=a.alloc)
             except Exception as exc:
                 row = dict(M=M, seed=s, status=f"error: {str(exc)[:100]}")
             rows.append(row)

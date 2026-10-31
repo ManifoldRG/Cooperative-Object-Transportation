@@ -160,6 +160,22 @@ def generate(layout: str = "crossing", M: int = 3, n_points: int = 6,
                     return pts
             raise RuntimeError("could not place payloads: enlarge ring_radius")
         starts, goals = draw_set(), draw_set()
+    elif layout == "random_joint":
+        # dart-throwing over starts AND goals jointly: all 2M endpoints
+        # pairwise >= sep, so start-goal cross clearances hold too (needed by
+        # spatially disjoint corridor methods, where endpoints pin the tubes).
+        pts = []
+        for _ in range(2 * M):
+            for _ in range(max_tries):
+                p = np_rng.uniform(-1, 1, 3) * ring_radius
+                if np.linalg.norm(p) > ring_radius:
+                    continue
+                if all(np.linalg.norm(p - q) >= sep for q in pts):
+                    pts.append(p)
+                    break
+            else:
+                raise RuntimeError("could not place payloads: enlarge ring_radius")
+        starts, goals = pts[:M], pts[M:]
     elif layout == "random_seq":
         # sequential (dart-throwing) placement: same uniform-in-ball target
         # distribution thinned by the separation, but each point is accepted

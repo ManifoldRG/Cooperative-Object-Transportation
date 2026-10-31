@@ -168,6 +168,38 @@ py multi_payload/benchmark/driver.py --out multi_payload/results/bench --M 3 4 5
 py multi_payload/benchmark/analyze.py multi_payload/results/bench/results.csv --by oracle M
 ```
 
+### Gauss and method-of-chains oracles (2026-10-31)
+
+Two more registered oracles share Steps 1 and 3–5 with `"waypoint"` (references,
+COT corridor solves, corridor relaxation) and differ in how the references are
+deconflicted. Both hand each payload a ball corridor whose radii are half the
+smallest surplus over δ of the deconflicted relative *segments* at each step, so
+trajectories inside the corridors are separated between steps too, not only at them.
+
+- `"gauss"`: Gaussian inflation (`studies/benchmark_methods.py:relax_iso`), headroom
+  `h = 30` m (the smallest that is continuous-safe on the benchmark family).
+- `"chains"`: the method of chains (`studies/expand_method.py`, notes Part I).
+  Monotone sphere-chain expansion with projected smoothing, segment check and
+  dilation failsafe (`h = 1` m, `alpha = 5` m), then 6 split-plane rounds (fixed
+  normals, midpoint re-centering, one translational fuel solve per payload per
+  round). Inside the oracle the Rigid Link limit is `max(rho, longest nominal link)`
+  and there is no grid refinement (the 6-DoF solve uses the scenario's N); a jam
+  returns `failed` with a reason (rerun with a larger N).
+
+```bash
+py multi_payload/benchmark/driver.py --out multi_payload/results/bench_deconf --M 3 4 5 6 \
+   --layouts crossing random --nus 60 --seeds 0 1 2 --oracles waypoint gauss chains --workers 4
+```
+
+Keyword options (`oracles.make("chains", h=..., alpha=..., split_rounds=...)`,
+`oracles.make("gauss", h=...)`) are passed through `oracle_kwargs` in a task.
+Smoke test (random layout, M = 4, seed 3; nominals 59 m inside δ): both `ok`,
+collision-free, rollout error ~1e-10, fuel 342.23 (gauss) vs 342.25 (chains), each
+~2 min in total, of which deconfliction is 0.3 s (gauss) and 8 s (chains). The
+translational benchmarks behind the notes are `studies/expand_method.py`
+(`--seg-chain --split-planes --split-D 0` for the decentralized method,
+`--qp-polish --seg-safe` for the centralized variant).
+
 ### Stress test of the waypoint-repair oracle (2026-10-16)
 
 `results/bench_stress` (3 agents per payload) and `results/bench_scarce` (2 per
