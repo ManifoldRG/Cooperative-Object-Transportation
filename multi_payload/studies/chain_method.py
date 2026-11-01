@@ -46,6 +46,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from benchmark_methods import relax_iso  # noqa: E402
 from benchmark_tubes import tubes_detail  # noqa: E402
 from multi_payload import scenario, translation  # noqa: E402
+from multi_payload.pairwise_geometry import separation  # noqa: E402
 
 HEADROOM = 60.0
 
@@ -379,10 +380,14 @@ def deconflict(rbar, pairs, tgt, L, max_iters=4000, window=200, theta=None,
 
 
 def run(M, seed, K0=30, tf=500.0, Kmax=480, Kmin=30, link_scale=None,
-        link_rho=2.0, bend_deg=None, h=HEADROOM, guard=False, cone=False):
+        link_rho=2.0, bend_deg=None, h=HEADROOM, guard=False, cone=False,
+        layout="random_seq", ring_radius=None):
     theta = None if bend_deg is None else np.deg2rad(bend_deg)
-    ring = 500.0 * max(1.0, M / 20.0) ** (1.0 / 3.0)
-    sc0 = scenario.generate("random_seq", M=M, n_points=8, n_agents=3 * M,
+    if not (2 <= Kmin <= K0 <= Kmax):
+        raise ValueError("Require 2 <= Kmin <= K0 <= Kmax")
+    ring = (500.0 * max(1.0, M / 20.0) ** (1.0 / 3.0)
+            if ring_radius is None else float(ring_radius))
+    sc0 = scenario.generate(layout, M=M, n_points=8, n_agents=3 * M,
                             seed=seed, nu_deg=60, N=K0, tf=tf,
                             ring_radius=ring, max_tries=5000)
     ext = [float(np.max(np.linalg.norm(P.points, axis=1))) for P in sc0.payloads]
@@ -394,11 +399,16 @@ def run(M, seed, K0=30, tf=500.0, Kmax=480, Kmin=30, link_scale=None,
     L = [link_rho * r for r in rho]
     pairs = [(j, l) for j in range(M) for l in range(j + 1, M)]
     tgt = {(j, l): rho[j] + rho[l] for (j, l) in pairs}
-    row = dict(M=M, seed=seed)
+    row = dict(M=M, seed=seed, N_requested=K0, K0=K0, Kmin=Kmin, Kmax=Kmax,
+               tf=float(tf), layout=layout, ring_radius=ring,
+               objective="native sum of force norms; no dt multiplier",
+               clearance="pair-specific extents plus shared margin",
+               verification="nodes_and_linear_segments", h=float(h))
     t_start = time.perf_counter()
 
     # pinned steps: true clearance must already hold (placement)
-    _, _, rb0, _ = nominals(sc0, K0)
+    sc, psis, rb0, LB0 = nominals(sc0, K0)
+    row["LB_initial"] = float(LB0)
     for (j, l) in pairs:
         for k in (0, K0):
             if np.linalg.norm(rb0[j][k] - rb0[l][k]) < deltas[j][l]:
@@ -406,14 +416,17 @@ def run(M, seed, K0=30, tf=500.0, Kmax=480, Kmin=30, link_scale=None,
                 return row
 
     # gauss baseline on the same instance at K0
-    sc, psis, rbar, LB0 = nominals(sc0, K0)
+    rbar = rb0
+    gauss_start = time.perf_counter()
     xg, _, _ = relax_iso(rbar, pairs, tgt, K0, M)
     if xg is not None:
         Jg, _, _ = tubes_detail(sc, psis, pairs, deltas, xg, K0, M)
         row["gap_gauss_pct"] = round(100 * (Jg - LB0) / LB0, 2) if Jg else None
+        row["J_gauss"] = float(Jg) if Jg is not None else None
+    row["t_gauss_baseline"] = time.perf_counter() - gauss_start
 
     # 1. nominal resolution for the Rigid Link constraint
-    cache = {}
+    cache = {K0: (sc, psis, rbar, LB0)}
 
     def nom(K):
         if K not in cache:
@@ -433,12 +446,13 @@ def run(M, seed, K0=30, tf=500.0, Kmax=480, Kmin=30, link_scale=None,
         if Kmin >= K:
             lo = K - 1
     else:
+        lo = K
         while not chain_ok(nom(K)[2]):
             if K >= Kmax:
                 row["status"] = "links unsatisfiable up to Kmax"
                 return row
-            K *= 2
-        lo, hi = K // 2, K
+            lo, K = K, min(2 * K, Kmax)
+        hi = K
     while hi - lo > 1:
         mid = (lo + hi) // 2
         if chain_ok(nom(mid)[2]):
@@ -479,7 +493,7 @@ def run(M, seed, K0=30, tf=500.0, Kmax=480, Kmin=30, link_scale=None,
             row["status"] = f"stuck up to Kmax (resid {attempt(K)[2]:.1f})"
             row["attempts"] = {k: [v[1], round(v[2], 1)] for k, v in attempts.items()}
             return row
-        K *= 2
+        K = min(2 * K, Kmax)
     if fail_K is not None:
         lo, hi = fail_K, K
         while hi - lo > 1:
@@ -491,16 +505,25 @@ def run(M, seed, K0=30, tf=500.0, Kmax=480, Kmin=30, link_scale=None,
         K = hi
     x = attempt(K)[0]
     row["K_final"] = K
+    row["N"] = K
+    row["dt"] = float(tf / K)
     row["attempts"] = {k: [v[1], round(v[2], 1)] for k, v in sorted(attempts.items())}
     row["t_chain"] = round(time.perf_counter() - t_start, 1)
 
     # 4. hand-off: half-split tubes + decoupled convex re-plans at K
     sck, psk, rbk, LBk = nom(K)
+    tube_start = time.perf_counter()
     Jc, rs, _ = tubes_detail(sck, psk, pairs, deltas, x, K, M)
+    row["t_tubes"] = time.perf_counter() - tube_start
+    row["t_total_with_gauss"] = time.perf_counter() - t_start
+    row["t_chain_total"] = row["t_total_with_gauss"] - row["t_gauss_baseline"]
     if Jc is None:
         row["status"] = "tube re-plan infeasible"
         return row
-    row["gap_chain_pct"] = round(100 * (Jc - LBk) / LBk, 2)
+    row["LB"] = float(LBk)
+    row["J_chain"] = float(Jc)
+    row["gap_chain_pct_exact"] = 100 * (Jc - LBk) / LBk
+    row["gap_chain_pct"] = round(row["gap_chain_pct_exact"], 2)
     row["monotone"] = {k: (round(v, 2) if isinstance(v, float) else v)
                        for k, v in mono[K].items()}
     row["max_link_over_limit"] = round(max(
@@ -511,57 +534,76 @@ def run(M, seed, K0=30, tf=500.0, Kmax=480, Kmin=30, link_scale=None,
     row["min_margin"] = round(min(
         float(np.min(np.linalg.norm(rs[j] - rs[l], axis=1))) - deltas[j][l]
         for (j, l) in pairs), 1)
-    row["status"] = "ok"
+    node_margin = min(float(np.min(np.linalg.norm(rs[j] - rs[l], axis=1)))
+                      - deltas[j][l] for j, l in pairs)
+    segment_check = separation([dict(r=np.asarray(r)) for r in rs], np.asarray(deltas))
+    row["node_margin_exact"] = node_margin
+    row["safe_chain_nodes"] = bool(node_margin >= -1e-6)
+    row["safe_chain_segments"] = bool(segment_check["ok"])
+    row["segment_margin_exact"] = float(segment_check["min_margin"])
+    row["status"] = ("node_unsafe" if not row["safe_chain_nodes"] else
+                     "segment_unsafe" if not row["safe_chain_segments"] else "ok")
     return row
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--Ms", type=int, nargs="+", default=[20, 30])
     ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1])
-    ap.add_argument("--Kmin", type=int, default=30,
-                    help="floor for the downward bisection (base resolution)")
-    ap.add_argument("--link-scale", type=float, default=None,
-                    help="tight-chain variant: link max = scale x nominal link")
-    ap.add_argument("--link-rho", type=float, default=2.0,
-                    help="Rigid Link max = link_rho x sphere radius rho_j")
-    ap.add_argument("--bend-deg", type=float, default=None,
-                    help="hard max turning angle per joint (degrees)")
+    ap.add_argument("--N", "--K0", dest="K0", type=int, default=30,
+                    help="Starting number of intervals; chain may refine up to Kmax")
+    ap.add_argument("--tf", type=float, default=500.)
+    ap.add_argument("--layout", choices=("random_seq", "crossing"), default="random_seq")
+    ap.add_argument("--ring", "--ring-radius", dest="ring_radius", type=float,
+                    help="Explicit radius; otherwise use the existing density scaling")
+    ap.add_argument("--Kmin", type=int, default=None,
+                    help="Minimum grid size (default: the requested --N)")
     ap.add_argument("--Kmax", type=int, default=480)
-    ap.add_argument("--h", type=float, default=HEADROOM,
-                    help="headroom beyond delta_jl (corridor width >= h/2)")
-    ap.add_argument("--guard-links", action="store_true",
-                    help="link projections never create or deepen an overlap")
-    ap.add_argument("--cone-repulsion", action="store_true",
-                    help="repulsion only along directions away from every "
-                         "nearby point; none eligible -> hold")
+    ap.add_argument("--link-scale", type=float, default=None)
+    ap.add_argument("--link-rho", type=float, default=2.)
+    ap.add_argument("--bend-deg", type=float, default=None)
+    ap.add_argument("--h", type=float, default=HEADROOM)
+    ap.add_argument("--guard-links", action="store_true")
+    ap.add_argument("--cone-repulsion", action="store_true")
+    ap.add_argument("--out", type=Path, help="JSON checkpoint written after every seed")
     a = ap.parse_args()
-    out = []
-    for M in a.Ms:
-        for s in a.seeds:
-            try:
-                r = run(M, s, Kmin=a.Kmin, link_scale=a.link_scale,
-                        link_rho=a.link_rho, bend_deg=a.bend_deg,
-                        Kmax=a.Kmax, h=a.h, guard=a.guard_links,
-                        cone=a.cone_repulsion)
-                r["h"] = a.h
-                r["guard"] = a.guard_links
-                r["cone"] = a.cone_repulsion
-                r["bend_deg"] = a.bend_deg
-                r["link_scale"] = a.link_scale
-                r["link_rho"] = a.link_rho
-            except Exception as exc:
-                r = dict(M=M, seed=s, status=f"error: {str(exc)[:100]}")
-            out.append(r)
-            print(json.dumps(r), flush=True)
-    tag = (f"scale{a.link_scale}" if a.link_scale is not None
-           else f"rho{a.link_rho}")
+    if a.Kmin is None:
+        a.Kmin = a.K0
+    if min(a.Ms) < 2 or not 2 <= a.Kmin <= a.K0 <= a.Kmax:
+        ap.error("Require M>=2 and 2 <= Kmin <= N <= Kmax")
+    for label, value in [("tf", a.tf), ("link-rho", a.link_rho),
+                         ("ring", a.ring_radius), ("link-scale", a.link_scale)]:
+        if value is not None and (not np.isfinite(value) or value <= 0):
+            ap.error(f"--{label} must be positive and finite")
+    if not np.isfinite(a.h) or a.h < 0:
+        ap.error("--h must be finite and nonnegative")
+    if a.bend_deg is not None and (not np.isfinite(a.bend_deg) or not 0 < a.bend_deg < 180):
+        ap.error("--bend-deg must be between 0 and 180 degrees")
+    tag = f"scale{a.link_scale}" if a.link_scale is not None else f"rho{a.link_rho}"
     if a.bend_deg is not None:
         tag += f"_bend{a.bend_deg:g}"
-    tag += (f"_h{a.h:g}" + ("_guard" if a.guard_links else "")
-            + ("_cone" if a.cone_repulsion else ""))
-    p = Path(__file__).with_name("results") / f"chain_method_{tag}.json"
-    p.write_text(json.dumps(out, indent=1))
+    tag += f"_h{a.h:g}" + ("_guard" if a.guard_links else "") + ("_cone" if a.cone_repulsion else "")
+    p = a.out or Path(__file__).with_name("results") / f"chain_method_{a.layout}_Nstart{a.K0}_{tag}.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    out = []
+    for M in a.Ms:
+        for seed in a.seeds:
+            print(f"Chain: layout={a.layout} M={M} seed={seed} Nstart={a.K0} Kmax={a.Kmax}",
+                  file=sys.stderr, flush=True)
+            try:
+                r = run(M, seed, K0=a.K0, tf=a.tf, Kmin=a.Kmin, Kmax=a.Kmax,
+                        link_scale=a.link_scale, link_rho=a.link_rho,
+                        bend_deg=a.bend_deg, h=a.h, guard=a.guard_links,
+                        cone=a.cone_repulsion, layout=a.layout, ring_radius=a.ring_radius)
+            except Exception as exc:
+                r = dict(M=M, seed=seed, N_requested=a.K0, layout=a.layout,
+                         tf=a.tf, status="error", error=str(exc))
+            r.update(h=a.h, guard=a.guard_links, cone=a.cone_repulsion,
+                     bend_deg=a.bend_deg, link_scale=a.link_scale, link_rho=a.link_rho)
+            out.append(r)
+            p.write_text(json.dumps(out, indent=2, allow_nan=False), encoding="utf-8")
+            print(json.dumps(r, allow_nan=False), flush=True)
+    print(f"Wrote {p}", flush=True)
 
 
 if __name__ == "__main__":
