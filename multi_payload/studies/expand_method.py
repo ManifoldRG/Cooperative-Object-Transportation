@@ -685,12 +685,14 @@ def run(M, seed, alpha, link_rho, K0=30, tf=500.0, Kmax=240, reach=np.inf,
         h=HEADROOM, h_conf=None, smooth=False, dyn_smooth=False,
         post_smooth=100, qp=False, failsafe=False, seg_safe=False,
         gauss_h=None, split=False, split_rounds=10, split_D=75.0,
-        seg_chain=False):
+        seg_chain=False, layout="random_seq", ring_radius=None):
     """h_conf: pairs whose nominals overlap (closer than delta + h at some
     timestep) get the larger target delta + h_conf, creating smoothing margin
-    exactly at the kinks; all other pairs keep delta + h."""
-    ring = 500.0 * max(1.0, M / 20.0) ** (1.0 / 3.0)
-    sc0 = scenario.generate("random_seq", M=M, n_points=8, n_agents=3 * M,
+    exactly at the kinks; all other pairs keep delta + h. ring_radius None =
+    the constant-density scaling 500 (M/20)^(1/3) m."""
+    ring = (500.0 * max(1.0, M / 20.0) ** (1.0 / 3.0) if ring_radius is None
+            else float(ring_radius))
+    sc0 = scenario.generate(layout, M=M, n_points=8, n_agents=3 * M,
                             seed=seed, nu_deg=60, N=K0, tf=tf,
                             ring_radius=ring, max_tries=5000)
     ext = [float(np.max(np.linalg.norm(P.points, axis=1))) for P in sc0.payloads]
@@ -854,43 +856,78 @@ def main():
     ap.add_argument("--seg-chain", action="store_true",
                     help="segment check in the chains: every segment must "
                          "clear delta before the phase ends")
+    ap.add_argument("--layout", choices=("random_seq", "crossing", "random_joint"),
+                    default="random_seq")
+    ap.add_argument("--ring", type=float, default=None,
+                    help="start/goal ring radius [m]; default: constant-density "
+                         "scaling 500 (M/20)^(1/3)")
+    ap.add_argument("--N", type=int, default=30,
+                    help="starting number of time steps (doubled on a jam)")
+    ap.add_argument("--Kmax", type=int, default=240)
+    ap.add_argument("--tf", type=float, default=500.0)
+    ap.add_argument("--workers", type=int, default=1,
+                    help="instances run in parallel processes")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
-    out = []
+
+    jobs = []
     for hc in a.h_confs:
-     for reach in a.reaches:
-      for alpha in a.alphas:
-        for M in a.Ms:
-            for s in a.seeds:
-                try:
-                    row = run(M, s, alpha, a.link_rho, reach=reach, h=a.h,
-                              h_conf=hc, smooth=a.smooth,
-                              dyn_smooth=a.dyn_smooth,
-                              post_smooth=a.post_smooth, qp=a.qp_polish,
-                              failsafe=a.failsafe, seg_safe=a.seg_safe,
-                              gauss_h=a.gauss_h, split=a.split_planes,
-                              split_rounds=a.split_rounds,
-                              split_D=(None if a.split_D == 0 else a.split_D),
-                              seg_chain=a.seg_chain)
-                    row["smooth"] = "dyn" if a.dyn_smooth else a.smooth
-                    row["post_smooth"] = a.post_smooth
-                    row["h"] = a.h
-                    row["h_conf"] = hc
-                except Exception as exc:
-                    row = dict(M=M, seed=s, alpha=alpha,
-                               status=f"error: {str(exc)[:90]}")
-                row["reach"] = reach if np.isfinite(reach) else "all"
-                out.append(row)
-                print(json.dumps(row), flush=True)
-                name = (f"expand_method_rho{a.link_rho:g}_h{a.h:g}"
-                        + ("_hconf" if a.h_confs != [None] else "")
-                        + ("_smooth" if a.smooth else "")
-                        + (f"_dyn{a.post_smooth}" if a.dyn_smooth else "")
-                        + ("_qp" if a.qp_polish else "") + ".json")
-                if a.out:
-                    name = a.out
-                p = Path(__file__).with_name("results") / name
-                p.write_text(json.dumps(out, indent=1))
+        for reach in a.reaches:
+            for alpha in a.alphas:
+                for M in a.Ms:
+                    for s in a.seeds:
+                        jobs.append(dict(
+                            M=M, seed=s, alpha=alpha, link_rho=a.link_rho,
+                            K0=a.N, tf=a.tf, Kmax=a.Kmax, reach=reach, h=a.h,
+                            h_conf=hc, smooth=a.smooth, dyn_smooth=a.dyn_smooth,
+                            post_smooth=a.post_smooth, qp=a.qp_polish,
+                            failsafe=a.failsafe, seg_safe=a.seg_safe,
+                            gauss_h=a.gauss_h, split=a.split_planes,
+                            split_rounds=a.split_rounds,
+                            split_D=(None if a.split_D == 0 else a.split_D),
+                            seg_chain=a.seg_chain, layout=a.layout,
+                            ring_radius=a.ring))
+    name = (f"expand_method_rho{a.link_rho:g}_h{a.h:g}"
+            + ("_hconf" if a.h_confs != [None] else "")
+            + ("_smooth" if a.smooth else "")
+            + (f"_dyn{a.post_smooth}" if a.dyn_smooth else "")
+            + ("_qp" if a.qp_polish else "") + ".json")
+    p = Path(__file__).with_name("results") / (a.out or name)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    out = []
+
+    def record(row):
+        out.append(row)
+        print(json.dumps(row), flush=True)
+        p.write_text(json.dumps(out, indent=1))
+
+    if a.workers > 1:
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        with ProcessPoolExecutor(max_workers=a.workers) as ex:
+            futs = [ex.submit(_run_job, job) for job in jobs]
+            for f in as_completed(futs):
+                record(f.result())
+    else:
+        for job in jobs:
+            record(_run_job(job))
+
+
+def _run_job(job):
+    """One instance, never raising (errors become a status row)."""
+    job = dict(job)
+    M, s, alpha, link_rho = job.pop("M"), job.pop("seed"), job.pop("alpha"), job.pop("link_rho")
+    try:
+        row = run(M, s, alpha, link_rho, **job)
+        row["smooth"] = "dyn" if job["dyn_smooth"] else job["smooth"]
+        row["post_smooth"] = job["post_smooth"]
+        row["h"] = job["h"]
+        row["h_conf"] = job["h_conf"]
+    except Exception as exc:
+        row = dict(M=M, seed=s, alpha=alpha, status=f"error: {str(exc)[:90]}")
+    row["layout"] = job["layout"]
+    row["N_start"] = job["K0"]
+    row["reach"] = job["reach"] if np.isfinite(job["reach"]) else "all"
+    return row
 
 
 if __name__ == "__main__":
