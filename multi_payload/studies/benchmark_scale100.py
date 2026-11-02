@@ -33,10 +33,18 @@ PRUNE = 300.0
 ALT_BUDGET = 600.0
 
 
-def alternate_capped(sc, psis, pairs, refs, deltas, iters=20, budget=ALT_BUDGET):
-    """alternate_pp with a wall-clock budget; returns (best, n_iters, capped)."""
+def alternate_capped(sc, psis, pairs, refs, deltas, iters=20, budget=ALT_BUDGET,
+                     return_details=False):
+    """alternate_pp with a wall-clock budget; returns (best, n_iters, capped).
+
+    return_details=True instead returns a dict with fuel (best value),
+    positions (M, N+1, 3) of the best iterate, iterations, capped and status
+    ('converged', 'iteration_limit', 'budget_capped', 'solver_failed' after at
+    least one solve, or 'no_solution'). The budget is checked after each joint
+    SOCP, so a single solve can overrun it."""
     etas = r2.nominal_normals(refs, pairs, sc.N)
-    best, capped = None, False
+    best, best_pos, capped = None, None, False
+    status, n_it = "iteration_limit", iters
     t0 = time.perf_counter()
     for it in range(iters):
         rv = [(cp.Variable((sc.N + 1, 3)), cp.Variable((sc.N + 1, 3)),
@@ -52,23 +60,31 @@ def alternate_capped(sc, psis, pairs, refs, deltas, iters=20, budget=ALT_BUDGET)
                                           for _, _, F in rv)), cons)
         try:
             prob.solve(solver="CLARABEL")
+            ok = prob.status in ("optimal", "optimal_inaccurate")
         except cp.error.SolverError:
-            break
-        if prob.status not in ("optimal", "optimal_inaccurate"):
+            ok = False
+        if not ok:
+            status, n_it = ("solver_failed" if best is not None else "no_solution"), it + 1
             break
         if best is not None and prob.value > best - 1e-9:
-            return best, it + 1, False
+            status, n_it = "converged", it + 1
+            break
         best = float(prob.value)
+        best_pos = np.array([np.asarray(r.value) for r, _, _ in rv])
         if time.perf_counter() - t0 > budget:
             capped = it + 1 < iters
-            return best, it + 1, capped
+            status, n_it = ("budget_capped" if capped else "iteration_limit"), it + 1
+            break
         for (j, l) in pairs:
             for k in range(sc.N + 1):
-                d = np.asarray(rv[j][0].value[k]) - np.asarray(rv[l][0].value[k])
+                d = best_pos[j, k] - best_pos[l, k]
                 n = np.linalg.norm(d)
                 if n > 1e-9:
                     etas[(j, l)][k] = d / n
-    return best, iters, capped
+    if return_details:
+        return dict(fuel=best, positions=best_pos, iterations=n_it,
+                    capped=capped, status=status)
+    return best, n_it, capped
 
 
 def planes_pruned(sc, psis, pairs, x, deltas):

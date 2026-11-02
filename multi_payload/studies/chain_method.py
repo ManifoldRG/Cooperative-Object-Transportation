@@ -535,7 +535,7 @@ def run(M, seed, K0=30, tf=500.0, Kmax=480, Kmin=30, link_scale=None,
         for (j, l) in pairs), 1)
     node_margin = min(float(np.min(np.linalg.norm(rs[j] - rs[l], axis=1)))
                       - deltas[j][l] for j, l in pairs)
-    from multi_payload.pairwise_geometry import separation  # not yet in the repo
+    from multi_payload.pairwise_geometry import separation
     segment_check = separation([dict(r=np.asarray(r)) for r in rs], np.asarray(deltas))
     row["node_margin_exact"] = node_margin
     row["safe_chain_nodes"] = bool(node_margin >= -1e-6)

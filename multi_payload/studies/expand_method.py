@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from benchmark_methods import relax_iso  # noqa: E402
 from benchmark_tubes import tubes_detail  # noqa: E402
 from chain_method import _project_cone, links_ok, nominals, step_targets  # noqa: E402
-from multi_payload import scenario  # noqa: E402
+from multi_payload import scenario, translation  # noqa: E402
 
 HEADROOM = 60.0
 
@@ -390,9 +390,126 @@ def try_move(P, j, k, alpha, T, L, K, reach=np.inf, S=None):
     return False
 
 
+def _project_cone_batch(v, Nrm, msk, iters=12):
+    """Row-wise _project_cone: v (B,3) unit vectors, Nrm (B,n,3) unit normals,
+    msk (B,n) which normals are active. Cyclic projection onto the most
+    violated half-space. Returns (v, ok); ok False where the projection
+    vanished or did not settle."""
+    v = v.copy()
+    ok = np.ones(len(v), bool)
+    if Nrm.shape[1] == 0:
+        return v, ok
+    rows = np.arange(len(v))
+    for _ in range(iters):
+        dots = np.where(msk, np.einsum("bnd,bd->bn", Nrm, v), np.inf)
+        i = np.argmin(dots, axis=1)
+        dmin = dots[rows, i]
+        act = ok & (dmin < -1e-9)
+        if not act.any():
+            break
+        v[act] -= dmin[act, None] * Nrm[rows, i][act]
+        nv = np.linalg.norm(v, axis=1)
+        ok &= ~(act & (nv < 1e-9))
+        v[ok] /= nv[ok, None]
+    final = np.where(msk, np.einsum("bnd,bd->bn", Nrm, v), np.inf)
+    ok &= final.min(axis=1) >= -1e-6
+    return v, ok
+
+
+def _adj_seg_batch(P, j, ks, pj):
+    """_adj_seg for many points at once: points (j, ks[b]) placed at pj[b].
+    ks are free steps (2..K-1), so both adjacent segments exist. Returns
+    (dist (2,B,M-1), unit direction (2,B,M-1,3)) for segments k-1 and k."""
+    O = P[np.arange(P.shape[0]) != j]                  # (M-1, K+1, 3)
+    out_d, out_c = [], []
+    for a0, a1, q in ((P[j, ks - 1], pj, ks - 1), (pj, P[j, ks + 1], ks)):
+        d0 = a0[:, None] - O[:, q].transpose(1, 0, 2)   # (B, M-1, 3)
+        e = (a1[:, None] - O[:, q + 1].transpose(1, 0, 2)) - d0
+        ee = np.sum(e * e, axis=2)
+        t = np.where(ee > 1e-12, np.clip(-np.sum(d0 * e, axis=2) / np.maximum(ee, 1e-12),
+                                         0.0, 1.0), 0.0)
+        c = d0 + t[..., None] * e
+        d = np.linalg.norm(c, axis=2)
+        out_d.append(d)
+        out_c.append(c / np.maximum(d, 1e-9)[..., None])
+    return np.stack(out_d), np.stack(out_c)
+
+
+def move_batch(P, j, ks, T, Lj, S=None, alpha=None, delta=None):
+    """Vectorized try_move (alpha given) / try_shift (delta (B,3) given) for
+    the points (j, ks) at once. The ks are at least 2 steps apart, so no two
+    share a link or a segment, and every other point is fixed while they move:
+    each accepted move passes exactly the per-point test of try_move /
+    try_shift, so the monotone invariants are unchanged. Returns #moved."""
+    M = P.shape[0]
+    B = len(ks)
+    rows = np.arange(B)
+    oth = np.arange(M) != j
+    p = P[j, ks]
+    O = P[oth][:, ks].transpose(1, 0, 2)               # (B, M-1, 3)
+    D = p[:, None] - O
+    dist = np.linalg.norm(D, axis=2)
+    tg = T[j][oth][:, ks].T                             # (B, M-1)
+    if delta is None:
+        mag = np.full(B, float(alpha))
+        u = D[rows, dist.argmin(axis=1)]
+        nu = np.linalg.norm(u, axis=1)
+        live = nu > 1e-9
+    else:
+        mag = np.linalg.norm(delta, axis=1)
+        live = mag > 1e-6
+        u, nu = delta, mag
+    u = u / np.maximum(nu, 1e-12)[:, None]
+    Nrm = [D / np.maximum(dist, 1e-9)[..., None]]
+    msk = [dist < tg + mag[:, None]]
+    for q in (ks - 1, ks + 1):                          # Rigid Link half-spaces
+        e = p - P[j, q]
+        en = np.linalg.norm(e, axis=1)
+        Nrm.append((-e / np.maximum(en, 1e-9)[:, None])[:, None])
+        msk.append(((en > Lj - mag) & (en > 1e-9))[:, None])
+    if S is not None:
+        S_j = S[j, oth]
+        sd0, sc0 = _adj_seg_batch(P, j, ks, p)
+        for s in range(2):
+            Nrm.append(sc0[s])
+            msk.append(sd0[s] < S_j + mag[:, None])
+        if delta is None:                               # segment-deficit direction
+            gap = (S_j - sd0).transpose(1, 0, 2).reshape(B, -1)
+            i = gap.argmax(axis=1)
+            use = (gap[rows, i] > 0) & np.all(dist >= tg, axis=1)
+            dirs = sc0.transpose(1, 0, 2, 3).reshape(B, -1, 3)[rows, i]
+            u = np.where(use[:, None], dirs, u)
+    v, ok = _project_cone_batch(u, np.concatenate(Nrm, axis=1),
+                                np.concatenate(msk, axis=1))
+    ok &= live
+    if delta is None:
+        step = mag.copy()
+    else:
+        step = mag * np.maximum(np.sum(v * u, axis=1), 0.0)
+        ok &= step >= 1e-6
+    acc = np.zeros(B, bool)
+    newp = p.copy()
+    for _ in range(4):                                  # exact checks, halving
+        cand = p + step[:, None] * v
+        nd = np.linalg.norm(cand[:, None] - O, axis=2)
+        good = ok & ~acc & np.all((nd >= dist - 1e-9) | (nd >= tg), axis=1)
+        for q in (ks - 1, ks + 1):
+            ln_new = np.linalg.norm(cand - P[j, q], axis=1)
+            ln_old = np.linalg.norm(p - P[j, q], axis=1)
+            good &= ln_new <= np.maximum(Lj, ln_old) + 1e-9
+        if S is not None and good.any():
+            sd1, _ = _adj_seg_batch(P, j, ks, cand)
+            good &= np.all((sd1 >= sd0 - 1e-9) | (sd1 >= S_j), axis=(0, 2))
+        newp[good] = cand[good]
+        acc |= good
+        step = step * 0.5
+    P[j, ks[acc]] = newp[acc]
+    return int(acc.sum())
+
+
 def deconflict(rbar, pairs, tgt, L, alpha, max_rounds=6000, window=300,
                reach=np.inf, h=HEADROOM, smooth=False, post_smooth=100,
-               dyn=None, failsafe=False, Dm=None, seg_h=0.25):
+               dyn=None, failsafe=False, Dm=None, seg_h=0.25, engine="numba"):
     """dyn = (H list, eta list): use the dynamics-aware smoothing step
     instead of the Gaussian blend. Dm (M,M) = clearances delta: if given,
     segment check on -- every segment k -> k+1 (k >= 1) is also driven to
@@ -403,41 +520,75 @@ def deconflict(rbar, pairs, tgt, L, alpha, max_rounds=6000, window=300,
     R = np.array(rbar, float)
     S = None if Dm is None else np.asarray(Dm, float) + seg_h
 
-    def smooth_step():
-        if dyn is None:
-            return smooth_round(P, R, T, L, K, S=S)
-        return smooth_round_dyn(P, R, T, L, K, dyn[0], dyn[1])
     M, K = P.shape[0], P.shape[1] - 1
+    free = np.arange(2, K)
+    Larr = np.asarray(L, float)
+    Sarr = np.zeros((M, M)) if S is None else np.ascontiguousarray(S, float)
+    if engine == "numba":
+        try:
+            import chain_kernels as ck
+        except ImportError:          # numba not installed: same moves, slower
+            import warnings
+            warnings.warn("numba not available; deconflict falls back to "
+                          "engine='numpy' (pip install numba for the fast path)")
+            engine = "numpy"
+    batches = [free[free % 2 == 0], free[free % 2 == 1]]
+
+    def smooth_step():
+        if dyn is not None:
+            return smooth_round_dyn(P, R, T, L, K, dyn[0], dyn[1])
+        if engine == "python":
+            return smooth_round(P, R, T, L, K, S=S)
+        if engine == "numba":
+            from scipy.ndimage import gaussian_filter1d
+            U = P - R
+            Delta = 0.25 * (gaussian_filter1d(U, sigma=1.5, axis=1) - U)
+            return int(ck.smooth_round(P, Delta, T, Larr, Sarr, S is not None))
+        from scipy.ndimage import gaussian_filter1d
+        n = 0
+        for j in range(M):
+            u = P[j] - R[j]
+            delta = 0.25 * (gaussian_filter1d(u, sigma=1.5, axis=0) - u)
+            for ks in batches:
+                if len(ks):
+                    n += move_batch(P, j, ks, T, L[j], S, delta=delta[ks])
+        return n
+
     T = np.zeros((M, M, K + 1))
     for (j, l), v in tgt.items():
         T[j, l] = T[l, j] = v
     sl = slice(2, K)
     segw = [0.0]                      # worst segment deficit below delta
+    PI = np.array([p[0] for p in pairs])
+    PJ = np.array([p[1] for p in pairs])
+    Tp = T[PI, PJ]                                       # (npairs, K+1)
+    if S is not None:
+        Dp = np.asarray(Dm, float)[PI, PJ][:, None]
+        Sp = S[PI, PJ][:, None]
 
     def overlap():
-        worst, total = 0.0, 0.0
-        for (j, l) in pairs:
-            need = tgt[(j, l)][sl] - np.linalg.norm(P[j, sl] - P[l, sl], axis=1)
-            if (need > 0).any():
-                worst = max(worst, float(need.max()))
-                total += float(need[need > 0].sum())
+        need = Tp[:, sl] - np.linalg.norm(P[PI, sl] - P[PJ, sl], axis=2)
+        pos = need[need > 0]
+        worst = float(pos.max()) if pos.size else 0.0
+        total = float(pos.sum())
         if S is not None:
-            sw = -np.inf
-            for (j, l) in pairs:
-                sd, _ = _seg_closest(P[j] - P[l])
-                sd = sd[1:]                       # segment 0 -> 1 is pinned
-                sw = max(sw, float(np.max(Dm[j][l] - sd)))
-                need = S[j, l] - sd
-                total += float(need[need > 0].sum())
-            segw[0] = sw
+            d = P[PI] - P[PJ]                            # (npairs, K+1, 3)
+            d0, e = d[:, :-1], d[:, 1:] - d[:, :-1]
+            ee = np.sum(e * e, axis=2)
+            t = np.where(ee > 1e-12, np.clip(-np.sum(d0 * e, axis=2)
+                                             / np.maximum(ee, 1e-12), 0.0, 1.0), 0.0)
+            sd = np.linalg.norm(d0 + t[..., None] * e, axis=2)[:, 1:]  # 0 -> 1 pinned
+            segw[0] = float(np.max(Dp - sd))
+            need = Sp - sd
+            total += float(need[need > 0].sum())
         return worst, total
 
     def done(worst, slack=0.1):
         return worst < slack and segw[0] <= 0.0
 
     def clipped():
-        return np.concatenate([np.minimum(np.linalg.norm(P[j, sl] - P[l, sl], axis=1),
-                                          tgt[(j, l)][sl]) for (j, l) in pairs])
+        return np.minimum(np.linalg.norm(P[PI, sl] - P[PJ, sl], axis=2),
+                          Tp[:, sl]).ravel()
 
     worst, total = overlap()
     best, best_it = total, 0
@@ -465,7 +616,18 @@ def deconflict(rbar, pairs, tgt, L, alpha, max_rounds=6000, window=300,
         if done(worst):
             return finish(it)
         c0 = clipped()
-        for j in range(M):
+        if engine == "numba" and not np.isfinite(reach):
+            n = int(ck.expansion_round(P, T, Larr, Sarr, S is not None, float(alpha)))
+            moves += n
+            holds += M * (K - 2) - n
+        for j in range(M if engine != "numba" or np.isfinite(reach) else 0):
+            if engine == "numpy" and not np.isfinite(reach):
+                for ks in batches:
+                    if len(ks):
+                        n = move_batch(P, j, ks, T, L[j], S, alpha=alpha)
+                        moves += n
+                        holds += len(ks) - n
+                continue
             for k in range(2, K):
                 if try_move(P, j, k, alpha, T, L[j], K, reach, S=S):
                     moves += 1
@@ -512,6 +674,71 @@ def _seg_closest(d):
     return np.linalg.norm(c, axis=1), c
 
 
+def _dyn_sparse(sc, psis, j, K):
+    """Payload j's discrete dynamics and boundary conditions as one sparse
+    equality A z = b over z = [r (K+1)x3 | v (K+1)x3 | F Kx3] (row-major),
+    the same discretization as route2_multi._dyn / translation.solve_reference:
+        r_{k+1} = r_k + dt v_k,  v_{k+1} = v_k + dt (Psi_k [r_k; v_k] + F_k / m).
+    One sparse block compiles in a fraction of the time of 2K small cvxpy
+    constraints."""
+    import scipy.sparse as spr
+    nz = 9 * K + 6
+    ri = lambda k: 3 * k                 # noqa: E731
+    vi = lambda k: 3 * (K + 1) + 3 * k   # noqa: E731
+    fi = lambda k: 6 * (K + 1) + 3 * k   # noqa: E731
+    I3 = np.eye(3)
+    m, dt = sc.payloads[j].m, sc.dt
+    rows, cols, vals, b = [], [], [], []
+
+    def put(row0, col0, blk):
+        rr, cc = np.nonzero(blk)
+        rows.extend(row0 + rr)
+        cols.extend(col0 + cc)
+        vals.extend(blk[rr, cc])
+    x0, xf = sc.payloads[j].x0, sc.payloads[j].xf
+    for n_, (c0, val) in enumerate(((ri(0), x0.r), (vi(0), x0.v),
+                                    (ri(K), xf.r), (vi(K), xf.v))):
+        put(3 * n_, c0, I3)
+        b.extend(np.asarray(val, float))
+    row = 12
+    for k in range(K):
+        Pk = psis[k]
+        put(row, ri(k + 1), I3)                   # r+ = r + dt v
+        put(row, ri(k), -I3)
+        put(row, vi(k), -dt * I3)
+        b.extend([0.0] * 3)
+        row += 3
+        put(row, vi(k + 1), I3)                   # v+ = v + dt (Psi [r;v] + F/m)
+        put(row, vi(k), -I3 - dt * Pk[:, 3:])
+        put(row, ri(k), -dt * Pk[:, :3])
+        put(row, fi(k), -(dt / m) * I3)
+        b.extend([0.0] * 3)
+        row += 3
+    return spr.csr_matrix((vals, (rows, cols)), shape=(row, nz)), np.array(b)
+
+
+def nominals_fast(sc0, K):
+    """chain_method.nominals with the sparse formulation: every payload's
+    fuel-optimal reference (no collision constraint) on a K-step grid.
+    Returns (sc, psis, rbar list, LB = sum of fuels)."""
+    import dataclasses
+    import cvxpy as cp
+    sc = dataclasses.replace(sc0, N=K)
+    psis = translation.psi_list(sc)
+    rbar, LB = [], 0.0
+    for j in range(sc.M):
+        A, b = _dyn_sparse(sc, psis, j, K)
+        z = cp.Variable(9 * K + 6)
+        Fz = cp.reshape(z[6 * (K + 1):], (K, 3), order="C")
+        prob = cp.Problem(cp.Minimize(cp.sum(cp.norm(Fz, 2, axis=1))), [A @ z == b])
+        prob.solve(solver="CLARABEL")
+        if prob.status not in ("optimal", "optimal_inaccurate"):
+            raise RuntimeError(f"nominal solve failed at K={K} (payload {j})")
+        rbar.append(np.asarray(z.value[:3 * (K + 1)]).reshape(K + 1, 3))
+        LB += float(np.sum(np.linalg.norm(np.asarray(Fz.value), axis=1)))
+    return sc, psis, rbar, LB
+
+
 def seg_tubes(sc, psis, x, pairs, deltas, N, M, cap=150.0):
     """Corridor re-plan that is safe at ALL times, not just at timesteps.
     Ball radius at step k = half the smallest surplus over delta of the
@@ -537,19 +764,22 @@ def seg_tubes(sc, psis, x, pairs, deltas, N, M, cap=150.0):
         return None, f"reference segment dips below delta ({worst:.2f} m)"
     fuel, rs = 0.0, []
     for j in range(M):
-        r = cp.Variable((N + 1, 3))
-        v = cp.Variable((N + 1, 3))
-        F = cp.Variable((N, 3))
-        cons = r2._dyn(sc, psis, r, v, F, j)
-        for k in range(1, N):
-            if eps[j][k] < cap:
-                cons.append(cp.norm(r[k] - x[j][k]) <= max(eps[j][k], 0.0))
-        prob = cp.Problem(cp.Minimize(cp.sum(cp.norm(F, 2, axis=1))), cons)
+        A, b = _dyn_sparse(sc, psis, j, N)
+        z = cp.Variable(9 * N + 6)
+        R = cp.reshape(z[:3 * (N + 1)], (N + 1, 3), order="C")
+        cons = [A @ z == b]
+        ks = [k for k in range(1, N) if eps[j][k] < cap]
+        if ks:
+            ks = np.array(ks)
+            cons.append(cp.norm(R[ks] - np.asarray(x[j])[ks], 2, axis=1)
+                        <= np.maximum(eps[j][ks], 0.0))
+        Fz = cp.reshape(z[6 * (N + 1):], (N, 3), order="C")
+        prob = cp.Problem(cp.Minimize(cp.sum(cp.norm(Fz, 2, axis=1))), cons)
         prob.solve(solver="CLARABEL")
         if prob.status not in ("optimal", "optimal_inaccurate"):
             return None, f"payload {j} {prob.status}"
         fuel += float(prob.value)
-        rs.append(np.asarray(r.value))
+        rs.append(np.asarray(z.value[:3 * (N + 1)]).reshape(N + 1, 3))
     return fuel, rs
 
 
@@ -574,38 +804,59 @@ def split_plane_rounds(sc, psis, P, pairs, tg, deltas, K, M, rounds=10,
                 continue
             W.append((j, l, k, c[k] / max(dist[k], 1e-9),
                       max(deltas[j][l], min(tk, dist[k]))))
+    # Wall entries: one per (pair, segment, free end). Their normals and
+    # clearances are fixed, only the split offsets change between rounds, so
+    # every payload's problem is built once with its offsets as a Parameter
+    # and re-solved each round (no re-canonicalization).
+    ent = [(j, l, e, eta, tp) for (j, l, k, eta, tp) in W
+           for e in (k, k + 1) if 2 <= e <= K - 1]
+    Ej = np.array([x[0] for x in ent], int)
+    El = np.array([x[1] for x in ent], int)
+    Ee = np.array([x[2] for x in ent], int)
+    Eeta = np.array([x[3] for x in ent], float).reshape(-1, 3)
+    Etp = np.array([x[4] for x in ent], float)
+    rows_j = [np.nonzero(Ej == j)[0] for j in range(M)]   # payload j: +eta side
+    rows_l = [np.nonzero(El == j)[0] for j in range(M)]   # payload j: -eta side
+    import scipy.sparse as spr
+    nz = 9 * K + 6
+    fi0 = 6 * (K + 1)
+    probs = []
+    for j in range(M):
+        A, b = _dyn_sparse(sc, psis, j, K)
+        z = cp.Variable(nz)
+        cons = [A @ z == b]
+        if D is not None:          # keep-in only needed when pairs are pruned
+            cons += [cp.norm(z[3 * k:3 * k + 3] - P[j, k]) <= D for k in range(2, K)]
+        idx = np.concatenate([Ee[rows_j[j]], Ee[rows_l[j]]])
+        rhs = None
+        if len(idx):
+            Et = np.vstack([Eeta[rows_j[j]], -Eeta[rows_l[j]]])
+            G = spr.csr_matrix((Et.ravel(), (np.repeat(np.arange(len(idx)), 3),
+                                             (3 * idx[:, None] + np.arange(3)).ravel())),
+                               shape=(len(idx), nz))
+            rhs = cp.Parameter(len(idx))
+            cons.append(G @ z >= rhs - 1e-6)      # eta_i . r[e_i] >= rhs_i
+        Fz = cp.reshape(z[fi0:], (K, 3), order="C")
+        prob = cp.Problem(cp.Minimize(cp.sum(cp.norm(Fz, 2, axis=1))), cons)
+        r = z[:3 * (K + 1)]
+        probs.append((prob, r, rhs))
+
     cur = np.array(P, float)
     hist = []
     for _ in range(rounds):
-        walls = [[] for _ in range(M)]
-        for (j, l, k, eta, tp) in W:
-            for e in (k, k + 1):
-                if 2 <= e <= K - 1:
-                    o = float(eta @ (cur[j, e] + cur[l, e])) / 2
-                    walls[j].append((e, eta, o + tp / 2))
-                    walls[l].append((e, -eta, -(o - tp / 2)))
+        # split points at the midpoints of the current positions
+        o = 0.5 * np.sum(Eeta * (cur[Ej, Ee] + cur[El, Ee]), axis=1)
+        b_j = o + Etp / 2                 # eta . r_j >= o + T'/2
+        b_l = -o + Etp / 2                # -eta . r_l >= -(o - T'/2)
         fuel, new = 0.0, []
-        for j in range(M):
-            r = cp.Variable((K + 1, 3))
-            v = cp.Variable((K + 1, 3))
-            F = cp.Variable((K, 3))
-            cons = r2._dyn(sc, psis, r, v, F, j)
-            if D is not None:      # keep-in only needed when pairs are pruned
-                cons += [cp.norm(r[k] - P[j, k]) <= D for k in range(2, K)]
-            if walls[j]:
-                idx = np.array([e for (e, _, _) in walls[j]])
-                Et = np.array([eta for (_, eta, _) in walls[j]])
-                rhs = np.array([b for (_, _, b) in walls[j]])
-                # one vectorized block: eta_i . r[e_i] >= rhs_i
-                sel = np.zeros((len(idx), K + 1))
-                sel[np.arange(len(idx)), idx] = 1.0
-                cons.append(cp.sum(cp.multiply(Et, sel @ r), axis=1) >= rhs - 1e-6)
-            prob = cp.Problem(cp.Minimize(cp.sum(cp.norm(F, 2, axis=1))), cons)
+        for j, (prob, r, rhs) in enumerate(probs):
+            if rhs is not None:
+                rhs.value = np.concatenate([b_j[rows_j[j]], b_l[rows_l[j]]])
             prob.solve(solver="CLARABEL")
             if prob.status not in ("optimal", "optimal_inaccurate"):
                 return hist if hist else None
             fuel += float(prob.value)
-            new.append(np.asarray(r.value))
+            new.append(np.asarray(r.value).reshape(K + 1, 3))
         cur = np.array(new)
         hist.append((fuel, new))
     return hist
@@ -685,7 +936,8 @@ def run(M, seed, alpha, link_rho, K0=30, tf=500.0, Kmax=240, reach=np.inf,
         h=HEADROOM, h_conf=None, smooth=False, dyn_smooth=False,
         post_smooth=100, qp=False, failsafe=False, seg_safe=False,
         gauss_h=None, split=False, split_rounds=10, split_D=75.0,
-        seg_chain=False, layout="random_seq", ring_radius=None):
+        seg_chain=False, layout="random_seq", ring_radius=None,
+        link_floor=False, tent_h=None, engine="numba"):
     """h_conf: pairs whose nominals overlap (closer than delta + h at some
     timestep) get the larger target delta + h_conf, creating smoothing margin
     exactly at the kinks; all other pairs keep delta + h. ring_radius None =
@@ -703,33 +955,56 @@ def run(M, seed, alpha, link_rho, K0=30, tf=500.0, Kmax=240, reach=np.inf,
     pairs = [(j, l) for j in range(M) for l in range(j + 1, M)]
     row = dict(M=M, seed=seed, alpha=alpha, link_rho=link_rho)
 
-    sc, psis, rbar, LB0 = nominals(sc0, K0)
-    hg = h if gauss_h is None else gauss_h
-    rho_g = [e + margin / 2 + hg / 2 for e in ext]
-    tg0 = {(j, l): rho_g[j] + rho_g[l] for (j, l) in pairs}
-    row["gauss_h"] = hg
-    xg, _, _ = relax_iso(rbar, pairs, tg0, K0, M)
-    if xg is not None:
+    _nom_cache = {}
+
+    def nom(K):
+        """Nominals on a K-step grid, solved once per K (sparse formulation)."""
+        if K not in _nom_cache:
+            _nom_cache[K] = nominals_fast(sc0, K)
+        return _nom_cache[K]
+
+    sc, psis, rbar, LB0 = nom(K0)
+    if link_floor:
+        # Rigid Link limit never below the nominal's own longest link, so long
+        # nominal paths do not force a finer grid before deconfliction starts
+        L = [max(L[j], float(np.max(np.linalg.norm(np.diff(rbar[j], axis=0), axis=1))))
+             for j in range(M)]
+    row["link_floor"] = bool(link_floor)
+
+    def baseline(tag, hb, profile):
+        rho_b = [e + margin / 2 + hb / 2 for e in ext]
+        tgb = {(j, l): rho_b[j] + rho_b[l] for (j, l) in pairs}
+        row[f"{tag}_h"] = hb
+        tb = time.perf_counter()
+        xb, _, _ = relax_iso(rbar, pairs, tgb, K0, M, profile=profile)
+        if xb is None:
+            row[f"{tag}_status"] = "inflation did not clear"
+            return
         if seg_safe:
-            Jg, rsg = seg_tubes(sc, psis, [np.asarray(v) for v in xg], pairs,
+            Jb, rsb = seg_tubes(sc, psis, [np.asarray(v) for v in xb], pairs,
                                 deltas, K0, M)
-            if Jg is None:
-                row["gauss_status"] = rsg
+            if Jb is None:
+                row[f"{tag}_status"] = rsb
         else:
-            Jg, rsg, _ = tubes_detail(sc, psis, pairs, deltas, xg, K0, M)
-        row["gap_gauss_pct"] = round(100 * (Jg - LB0) / LB0, 2) if Jg else None
-        if Jg:
-            cw, cb, cn = cont_margin(rsg, pairs, deltas)
-            row["gauss_cont_min_margin"] = round(cw, 3)
-            row["gauss_cont_violations"] = f"{cb}/{cn}"
+            Jb, rsb, _ = tubes_detail(sc, psis, pairs, deltas, xb, K0, M)
+        row[f"t_{tag}"] = round(time.perf_counter() - tb, 1)
+        row[f"gap_{tag}_pct"] = round(100 * (Jb - LB0) / LB0, 2) if Jb else None
+        if Jb:
+            cw, cb, cn = cont_margin(rsb, pairs, deltas)
+            row[f"{tag}_cont_min_margin"] = round(cw, 3)
+            row[f"{tag}_cont_violations"] = f"{cb}/{cn}"
+
+    baseline("gauss", h if gauss_h is None else gauss_h, "gauss")
+    if tent_h is not None:
+        baseline("tent", tent_h, "tent")
 
     t0 = time.perf_counter()
     K = K0
-    while not links_ok(nominals(sc0, K)[2], L):
+    while not links_ok(nom(K)[2], L):
         K *= 2
     attempts = {}
     while True:
-        sck, psk, rbk, LBk = nominals(sc0, K)
+        sck, psk, rbk, LBk = nom(K)
         tg = step_targets(rbk, pairs, deltas, L, h)
         if h_conf is not None:
             tgc = step_targets(rbk, pairs, deltas, L, h_conf)
@@ -757,7 +1032,8 @@ def run(M, seed, alpha, link_rho, K0=30, tf=500.0, Kmax=240, reach=np.inf,
         P, it, res, st = deconflict(rbk, pairs, tg, L, alpha, reach=reach, h=h,
                                     smooth=smooth or dyn_smooth, dyn=dyn,
                                     post_smooth=post_smooth, failsafe=failsafe,
-                                    Dm=(deltas if seg_chain else None))
+                                    Dm=(deltas if seg_chain else None),
+                                    engine=engine)
         attempts[K] = [it, round(res, 1), st]
         if P is not None or K >= Kmax:
             break
@@ -865,6 +1141,14 @@ def main():
                     help="starting number of time steps (doubled on a jam)")
     ap.add_argument("--Kmax", type=int, default=240)
     ap.add_argument("--tf", type=float, default=500.0)
+    ap.add_argument("--link-floor", action="store_true",
+                    help="Rigid Link limit = max(link_rho*rho, longest nominal link): "
+                         "no grid refinement forced by long nominal paths")
+    ap.add_argument("--engine", choices=("numba", "numpy", "python"), default="numba",
+                    help="deconfliction moves: numba kernels (default), numpy batches "
+                         "(red-black), or the original per-point Python loop")
+    ap.add_argument("--tent-h", type=float, default=None,
+                    help="also run the tent-profile inflation baseline at this headroom")
     ap.add_argument("--workers", type=int, default=1,
                     help="instances run in parallel processes")
     ap.add_argument("--out", default=None)
@@ -886,7 +1170,8 @@ def main():
                             split_rounds=a.split_rounds,
                             split_D=(None if a.split_D == 0 else a.split_D),
                             seg_chain=a.seg_chain, layout=a.layout,
-                            ring_radius=a.ring))
+                            ring_radius=a.ring, link_floor=a.link_floor,
+                            tent_h=a.tent_h, engine=a.engine))
     name = (f"expand_method_rho{a.link_rho:g}_h{a.h:g}"
             + ("_hconf" if a.h_confs != [None] else "")
             + ("_smooth" if a.smooth else "")
