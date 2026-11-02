@@ -252,10 +252,11 @@ class ChainsOracle(_DeconflictOracle):
 
     name = "chains"
 
-    def __init__(self, h=1.0, alpha=5.0, link_rho=1.0, split_rounds=6, **kw):
+    def __init__(self, h=1.0, alpha=5.0, link_rho=1.0, split_rounds=6,
+                 mass_split=False, **kw):
         super().__init__(**kw)
         self.h, self.alpha, self.link_rho = h, alpha, link_rho
-        self.split_rounds = split_rounds
+        self.split_rounds, self.mass_split = split_rounds, mass_split
 
     def _deconflict(self, sc, psis, rbar):
         _studies_path()
@@ -278,12 +279,48 @@ class ChainsOracle(_DeconflictOracle):
             return None, dict(info, reason="chains jammed on this grid (no refinement "
                                            "inside the oracle; rerun with a larger N)")
         hist = split_plane_rounds(sc, psis, P, pairs, tg, deltas, N, M,
-                                  rounds=self.split_rounds, D=None)
+                                  rounds=self.split_rounds, D=None,
+                                  mass_split=self.mass_split)
         if not hist:
             return None, dict(info, reason="split-plane round 1 infeasible")
         info["split_fuel_by_round"] = [round(f, 4) for f, _ in hist]
         return [np.asarray(r, float) for r in hist[-1][1]], info
 
 
+class GatedTentOracle(_DeconflictOracle):
+    """Gated tent (studies/gated_tent.py): Jowett's mass-weighted tent pushes,
+    each the exact projection onto one pair's clearance set in the kinetic
+    metric, swept Gauss-Seidel and accepted only under sufficient decrease of
+    the merit function Phi (sum of squared metric distances to all clearance
+    sets); halving, then a gradient step, otherwise. Converges to a stationary
+    point of Phi; on convergence every step clears delta + h - tol, and the
+    segment certificate (step-length lemma) is checked before the corridors.
+    h = 10 m is the benchmark setting; no grid refinement inside the oracle."""
+
+    name = "tent_gated"
+
+    def __init__(self, h=10.0, mass_weighted=True, budget_s=120.0, **kw):
+        super().__init__(**kw)
+        self.h, self.mass_weighted, self.gate_budget = h, mass_weighted, budget_s
+
+    def _deconflict(self, sc, psis, rbar):
+        _studies_path()
+        from gated_tent import deconflict
+        M = sc.M
+        pairs = [(j, l) for j in range(M) for l in range(j + 1, M)]
+        tgt = {p: sc.delta + self.h for p in pairs}
+        masses = [P.m for P in sc.payloads] if self.mass_weighted else None
+        deltas = [[sc.delta] * M for _ in range(M)]
+        X, info = deconflict(rbar, pairs, tgt, masses=masses, variant="gated",
+                             budget_s=self.gate_budget, deltas=deltas)
+        info = dict(method="tent_gated", h=self.h, **info)
+        if X is None:
+            return None, dict(info, reason=f"gated tent stopped: {info['status']}")
+        if not info["seg_certified"]:
+            return None, dict(info, reason="segment certificate failed (raise h or N)")
+        return [np.asarray(v, float) for v in X], info
+
+
 register("gauss", GaussOracle)
 register("chains", ChainsOracle)
+register("tent_gated", GatedTentOracle)

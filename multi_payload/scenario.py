@@ -147,6 +147,14 @@ def generate(layout: str = "crossing", M: int = 3, n_points: int = 6,
             goals.append(-ring_radius * (np.cos(th + jit) * u + np.sin(th + jit) * w))
         if M > 1 and 2 * ring_radius * np.sin(np.pi / M) < sep:
             raise ValueError("ring too small for the payload extents: increase ring_radius")
+        # The goal jitter can bring neighbouring goals up to half the ring
+        # spacing closer, so check the actual endpoints: a pinned pair closer
+        # than delta makes the instance infeasible for every method.
+        for pts in (starts, goals):
+            if any(np.linalg.norm(pts[i] - pts[k]) < delta
+                   for i in range(M) for k in range(i + 1, M)):
+                raise ValueError("jittered crossing endpoints closer than the "
+                                 "clearance: increase ring_radius or change seed")
     elif layout == "random":
         def draw_set():
             for _ in range(max_tries):

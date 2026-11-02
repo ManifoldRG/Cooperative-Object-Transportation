@@ -4,6 +4,14 @@ All methods share scenario, nominal trajectories and pair-specific clearances.
 The leader's original inflation/tube functions are called directly. Group repair
 keeps its existing internal algorithm (including its stricter segment checks);
 the benchmark's reported safety criterion for all three outputs is node separation.
+
+Every check also reports the exact between-node (segment) clearance of the
+piecewise-linear trajectories (seg_safe_*, seg_margin_*); --segment-check makes
+segment clearance part of the safety criterion. --gated-tent replaces the tent
+sweeps with the gated tent (studies/gated_tent.py: same pushes, accepted only
+under sufficient decrease of the merit function, gradient fallback; converges
+to a stationary point). --seg-tubes replaces the original node tubes with
+segment-sized tubes (expand_method.seg_tubes), which are safe between nodes.
 """
 from __future__ import annotations
 
@@ -26,8 +34,25 @@ import benchmark_scale100 as planes
 from multi_payload import scenario, translation, group_tube_repair, group_tube_pairwise
 
 
+SEGMENT_SAFETY=False  # --segment-check: 'safe' also requires segment clearance
+
+
+def segment_margins(positions, deltas):
+    """Exact closest approach - delta of every pair's relative segment between
+    consecutive nodes (positions are piecewise linear in time). Shape (pairs, nodes-1)."""
+    count=len(positions)
+    i,j=np.triu_indices(count,1)
+    d=positions[i]-positions[j]
+    d0,e=d[:,:-1],np.diff(d,axis=1)
+    ee=np.sum(e*e,axis=-1)
+    t=np.where(ee>1e-12,np.clip(-np.sum(d0*e,axis=-1)/np.maximum(ee,1e-12),0.,1.),0.)
+    return np.linalg.norm(d0+t[...,None]*e,axis=-1)-deltas[i,j,None],i,j
+
+
 def node_check(positions, deltas, tolerance=1e-6):
-    """Original min distance over SAVED NODES only; no interpolation."""
+    """Original min distance over SAVED NODES only; no interpolation.
+    Also reports the exact segment (between-node) clearance; it enters 'safe'
+    only with --segment-check (SEGMENT_SAFETY)."""
     positions=np.asarray(positions,dtype=float)
     deltas=np.asarray(deltas,dtype=float)
     if positions.ndim!=3 or positions.shape[-1]!=3 or len(positions)<2:
@@ -36,13 +61,19 @@ def node_check(positions, deltas, tolerance=1e-6):
     if deltas.shape!=(count,count):
         raise ValueError('deltas must have shape (M,M)')
     if not np.isfinite(positions).all() or not np.isfinite(deltas).all():
-        return dict(safe=False,min_margin=None,worst_pair=None,worst_node=None)
+        return dict(safe=False,min_margin=None,worst_pair=None,worst_node=None,
+                    node_safe=False,seg_safe=False,seg_margin=None,seg_bad=None)
     i,j=np.triu_indices(count,1)
     margins=np.linalg.norm(positions[i]-positions[j],axis=-1)-deltas[i,j,None]
     pair,node=np.unravel_index(np.argmin(margins),margins.shape)
     margin=float(margins[pair,node])
-    return dict(safe=bool(margin>=-tolerance),min_margin=margin,
-                worst_pair=[int(i[pair]),int(j[pair])],worst_node=int(node))
+    seg,_,_=segment_margins(positions,deltas)
+    node_safe=bool(margin>=-tolerance)
+    seg_safe=bool(seg.min()>=-tolerance)
+    return dict(safe=node_safe and (seg_safe or not SEGMENT_SAFETY),min_margin=margin,
+                worst_pair=[int(i[pair]),int(j[pair])],worst_node=int(node),
+                node_safe=node_safe,seg_safe=seg_safe,seg_margin=float(seg.min()),
+                seg_bad=int(np.sum(seg<-tolerance)))
 
 
 def run_full_lbfgs_instance(sc,psis,refs,deltas,*,seed=0,budget=80.,
@@ -70,6 +101,7 @@ def run_full_lbfgs_instance(sc,psis,refs,deltas,*,seed=0,budget=80.,
                    safe_full_lbfgs=check['safe'],full_lbfgs_status=info['status'],
                    min_margin_full_lbfgs=check['min_margin'],
                    worst_pair_full_lbfgs=check['worst_pair'],worst_node_full_lbfgs=check['worst_node'],
+                   seg_safe_full_lbfgs=check['seg_safe'],seg_margin_full_lbfgs=check['seg_margin'],seg_bad_full_lbfgs=check['seg_bad'],
                    full_lbfgs_internal_segment_safe=bool(info['ok']),
                    full_lbfgs_iters=info.get('iterations',0),
                    full_lbfgs_training_times=info.get('training_times'),
@@ -104,6 +136,7 @@ def run_alternating_instance(sc,psis,refs,deltas,*,budget=80.,iters=20,lower=Non
             row.update(J_alternation=fuel,J_alternation_safe=fuel if check['safe'] else None,
                        safe_alternation=check['safe'],min_margin_alternation=check['min_margin'],
                        worst_pair_alternation=check['worst_pair'],worst_node_alternation=check['worst_node'],
+                   seg_safe_alternation=check['seg_safe'],seg_margin_alternation=check['seg_margin'],seg_bad_alternation=check['seg_bad'],
                        alternation_gap_pct=100*(fuel/lower-1) if lower>0 else None)
     except Exception as exc:
         row.update(alternation_status='error',error_alternation=str(exc))
@@ -184,7 +217,8 @@ def headroom_schedule(N,dt,peak,*,variable=False,ramp_seconds=50.):
 
 
 def run_inflation_instance(sc,psis,refs,deltas,*,profile='gauss',inflation_sigma=1.5,lower=None,
-                           headroom=60.,variable_headroom=False,headroom_ramp_seconds=50.,mass_based_push=False,local_tent_width_seconds=None):
+                           headroom=60.,variable_headroom=False,headroom_ramp_seconds=50.,mass_based_push=False,local_tent_width_seconds=None,
+                           gated_tent=False,seg_tubes=False,gated_budget=120.):
     """Run inflation and original tubes on a prepared shared instance.
 
     Return inflation metrics only; do not generate scenarios or run group repair.
@@ -193,8 +227,10 @@ def run_inflation_instance(sc,psis,refs,deltas,*,profile='gauss',inflation_sigma
     """
     if not np.isfinite(inflation_sigma) or inflation_sigma<=0:
         raise ValueError('inflation_sigma must be positive and finite')
-    if (mass_based_push or local_tent_width_seconds is not None) and profile != 'tent':
-        raise ValueError('Mass-based push and local tent width require --profile tent or --tent-only')
+    if (mass_based_push or local_tent_width_seconds is not None or gated_tent) and profile != 'tent':
+        raise ValueError('Mass-based push, local tent width and gated tent require --profile tent or --tent-only')
+    if gated_tent and local_tent_width_seconds is not None:
+        raise ValueError('Gated tent uses the global tent (its convergence proof needs it); drop --local-tent-width')
     if local_tent_width_seconds is not None and (not np.isfinite(local_tent_width_seconds) or local_tent_width_seconds <= 0):
         raise ValueError('local_tent_width_seconds must be positive and finite (seconds per side)')
     N,M=sc.N,sc.M
@@ -206,7 +242,8 @@ def run_inflation_instance(sc,psis,refs,deltas,*,profile='gauss',inflation_sigma
              headroom_mode='variable' if variable_headroom else 'constant',
              headroom_initial_m=float(headroom),
              headroom_ramp_seconds=float(headroom_ramp_seconds) if variable_headroom else 0.,
-             mass_based_push=bool(mass_based_push),
+             mass_based_push=bool(mass_based_push),gated_tent=bool(gated_tent),
+             tube_type='segment' if seg_tubes else 'node',
              local_tent_width_units='seconds',
              local_tent_width_nodes=float(local_tent_width_seconds/sc.dt) if local_tent_width_seconds is not None else None,
              local_tent_half_width_seconds=float(local_tent_width_seconds) if local_tent_width_seconds is not None else None)
@@ -223,7 +260,15 @@ def run_inflation_instance(sc,psis,refs,deltas,*,profile='gauss',inflation_sigma
                                     ramp_seconds=headroom_ramp_seconds)
             targets={(i,j):deltas[i,j]+extra[2:N] for i,j in pairs} if variable_headroom else {
                 (i,j):float(deltas[i,j]+peak_headroom) for i,j in pairs}
-            if profile == 'tent' and (mass_based_push or local_tent_width_seconds is not None):
+            gate=None
+            if gated_tent:
+                import gated_tent as gt
+                X,gate=gt.deconflict(rbar,pairs,targets,
+                                     masses=[p.m for p in sc.payloads] if mass_based_push else None,
+                                     variant='gated',budget_s=gated_budget,deltas=deltas)
+                centers=None if X is None else [x for x in X]
+                sweeps,residual=gate['sweeps'],gate['worst']
+            elif profile == 'tent' and (mass_based_push or local_tent_width_seconds is not None):
                 centers,sweeps,residual=relax_tent_experimental(
                     rbar,pairs,targets,N,M,
                     masses=[p.m for p in sc.payloads] if mass_based_push else None,
@@ -236,24 +281,43 @@ def run_inflation_instance(sc,psis,refs,deltas,*,profile='gauss',inflation_sigma
                         headroom_max_applied_m=float(extra[2:N].max()),
                         headroom_first_movable_m=float(extra[2]),
                         headroom_last_movable_m=float(extra[N-1]))
+            if gate is not None:
+                detail.update(gate_status=gate['status'],gate_rejected_sweeps=gate['rejected_sweeps'],
+                              gate_halvings=gate['halvings'],gate_grad_steps=gate['grad_steps'],
+                              gate_phi_monotone=gate['phi_monotone'],
+                              gate_seg_certified=gate.get('seg_certified'),
+                              gate_seg_margin=gate.get('seg_margin'),gate_lemma_margin=gate.get('lemma_margin'))
             attempts.append(detail)
             if centers is None:
                 row['tubes_status']='relax_failed'
+                if gate is not None:
+                    row['gate_status']=gate['status']
                 break
             t0=time.perf_counter()
-            fuel,positions,each=leader.tubes_detail(sc,psis,pairs,deltas,centers,N,M)
+            if seg_tubes:
+                import expand_method as em
+                fuel,positions=em.seg_tubes(sc,psis,[np.asarray(c,float) for c in centers],
+                                            pairs,deltas,N,M)
+                each=[time.perf_counter()-t0]
+            else:
+                fuel,positions,each=leader.tubes_detail(sc,psis,pairs,deltas,centers,N,M)
             tt=time.perf_counter()-t0;tube_seconds+=tt;detail['t_tubes']=tt
             if fuel is None:
-                detail['failed_payload']=int(positions)
+                if seg_tubes:
+                    detail['tube_failure']=str(positions)
+                else:
+                    detail['failed_payload']=int(positions)
                 row['tubes_status']='tube_solve_failed'
                 continue
             check=node_check(positions,deltas)
             row.update(J_tubes=float(fuel),J_tubes_safe=float(fuel) if check['safe'] else None,
                        safe_tubes=check['safe'],min_margin_tubes=check['min_margin'],
                        worst_pair_tubes=check['worst_pair'],worst_node_tubes=check['worst_node'],
+                   seg_safe_tubes=check['seg_safe'],seg_margin_tubes=check['seg_margin'],seg_bad_tubes=check['seg_bad'],
                        headroom=float(peak_headroom),relax_sweeps=sweeps,t_tube_max=max(each),
                        tubes_gap_pct=100*(float(fuel)/lower-1),
-                       tubes_status='node_safe' if check['safe'] else 'node_unsafe')
+                       tubes_status=('safe' if SEGMENT_SAFETY else 'node_safe') if check['safe']
+                       else ('unsafe' if SEGMENT_SAFETY else 'node_unsafe'))
             # Same retry rule as leader: retry infeasible solves, not post-check violations.
             break
     except Exception as exc:
@@ -295,6 +359,7 @@ def run_groupnlp_instance(sc,psis,refs,deltas,*,seed=0,group_size=4,
         row.update(J_group=fuel,J_group_safe=fuel if check['safe'] else None,
                    safe_group=check['safe'],min_margin_group=check['min_margin'],
                    worst_pair_group=check['worst_pair'],worst_node_group=check['worst_node'],
+                   seg_safe_group=check['seg_safe'],seg_margin_group=check['seg_margin'],seg_bad_group=check['seg_bad'],
                    t_group=solve_seconds,group_gap_pct=100*(fuel/lower-1),
                    group_status=info['status'],group_internal_segment_safe=bool(info['ok']),
                    group_local_solves=info.get('local_solves',0))
@@ -324,6 +389,7 @@ def run_groupnlp_instance(sc,psis,refs,deltas,*,seed=0,group_size=4,
                            min_margin_group_tubes=refined_check['min_margin'],
                            worst_pair_group_tubes=refined_check['worst_pair'],
                            worst_node_group_tubes=refined_check['worst_node'],
+                   seg_safe_group_tubes=refined_check['seg_safe'],seg_margin_group_tubes=refined_check['seg_margin'],seg_bad_group_tubes=refined_check['seg_bad'],
                            group_tubes_gap_pct=100*(refined_fuel/lower-1),
                            group_tubes_fuel_reduction_pct=100*(1-refined_fuel/row['J_group']) if row['J_group']>0 else None,
                            t_group_tube_max=max(each),
@@ -342,7 +408,8 @@ def run_sigma_sweep(M,seed,N,tf,*,layout='random_seq',profile='gauss',ring_radiu
                  alternating=True,alternating_budget=80.,alternating_iters=20,
                  full_lbfgs=True,full_lbfgs_budget=80.,full_lbfgs_clearance=0.,
                  full_lbfgs_maxiter=90,full_lbfgs_stages=12,tent_only=False,
-                 headroom=60.,variable_headroom=False,headroom_ramp_seconds=50.,mass_based_push=False,local_tent_width_seconds=None):
+                 headroom=60.,variable_headroom=False,headroom_ramp_seconds=50.,mass_based_push=False,local_tent_width_seconds=None,
+                 gated_tent=False,seg_tubes=False,gated_budget=120.):
     headroom_schedule(N,tf/N,headroom,variable=variable_headroom,ramp_seconds=headroom_ramp_seconds)
     if tent_only:
         profile='tent'
@@ -405,14 +472,15 @@ def run_sigma_sweep(M,seed,N,tf,*,layout='random_seq',profile='gauss',ring_radiu
 
     inflation_rows=[]
     for sigma in inflation_sigmas:
-        label='tent inflation+tubes' if tent_only else f'inflation_sigma={sigma:g}: inflation+tubes'
+        label=('gated tent' if gated_tent else 'tent')+' inflation+tubes' if tent_only else f'inflation_sigma={sigma:g}: inflation+tubes'
         print(f'M={M} seed={seed} {label} (node check)',
               file=sys.stderr,flush=True)
         inflation_rows.append(run_inflation_instance(
             sc,psis,refs,deltas,profile=profile,inflation_sigma=sigma,lower=lower,
             headroom=headroom,variable_headroom=variable_headroom,
             headroom_ramp_seconds=headroom_ramp_seconds,
-            mass_based_push=mass_based_push,local_tent_width_seconds=local_tent_width_seconds))
+            mass_based_push=mass_based_push,local_tent_width_seconds=local_tent_width_seconds,
+            gated_tent=gated_tent,seg_tubes=seg_tubes,gated_budget=gated_budget))
     if not tent_only:
         row.update(run_groupnlp_instance(sc,psis,refs,deltas,seed=seed,
                    group_size=group_size,group_budget=group_budget,refine_group=refine_group,
@@ -483,6 +551,13 @@ def main():
                         help='Split tent pushes inversely by payload mass (lighter moves farther); requires tent profile')
     parser.add_argument('--local-tent-width-seconds','--local-tent-width',dest='local_tent_width_seconds',type=float,default=None,
                         help='Tent half-width in SECONDS on each side of the conflict peak (e.g. 133.33333333333334); default: global tent. Both flag spellings use seconds. Requires tent profile')
+    parser.add_argument('--gated-tent',action='store_true',
+                        help='Gated tent (studies/gated_tent.py): tent sweeps accepted only under sufficient decrease of the merit function, with halving and gradient fallback; provably converges to a stationary point. Implies --profile tent; combine with --mass-based-push for mass weighting')
+    parser.add_argument('--gated-budget',type=float,default=120.,help='Gated-tent time budget per relaxation in seconds (default: 120)')
+    parser.add_argument('--seg-tubes',action='store_true',
+                        help='Use segment-sized tubes (radius = half the smallest segment surplus over delta; safe between nodes) instead of the original node tubes')
+    parser.add_argument('--segment-check',action='store_true',
+                        help='Count a result as safe only if every between-node segment also clears delta (segment fields are always reported)')
     parser.add_argument('--headroom',type=float,default=60.,
                         help='Initial extra inflation spacing in metres (default: 60); doubled on tube-infeasibility retry')
     parser.add_argument('--variable-headroom',action='store_true',
@@ -513,6 +588,13 @@ def main():
         args.no_alternating=True
         args.no_full_lbfgs=True
         args.no_group_tubes=True
+    if args.gated_tent:
+        args.profile='tent'
+        if args.local_tent_width_seconds is not None:
+            parser.error('--gated-tent uses the global tent; drop --local-tent-width')
+    if args.segment_check:
+        global SEGMENT_SAFETY
+        SEGMENT_SAFETY=True
     if (args.mass_based_push or args.local_tent_width_seconds is not None) and args.profile != 'tent':
         parser.error('--mass-based-push and --local-tent-width require --profile tent or --tent-only')
     if args.local_tent_width_seconds is not None and (not np.isfinite(args.local_tent_width_seconds) or args.local_tent_width_seconds <= 0):
@@ -553,7 +635,8 @@ def main():
                                  full_lbfgs_stages=args.full_lbfgs_stages,tent_only=args.tent_only,
                                  headroom=args.headroom,variable_headroom=args.variable_headroom,
                                  headroom_ramp_seconds=args.headroom_ramp_seconds,
-                                 mass_based_push=args.mass_based_push,local_tent_width_seconds=args.local_tent_width_seconds)
+                                 mass_based_push=args.mass_based_push,local_tent_width_seconds=args.local_tent_width_seconds,
+                                 gated_tent=args.gated_tent,seg_tubes=args.seg_tubes,gated_budget=args.gated_budget)
             except Exception as exc:
                 instance_rows=[dict(M=M,seed=seed,inflation_sigma=sigma,verification='nodes_only',
                                     status='setup_error',error=str(exc)) for sigma in args.inflation_sigma]

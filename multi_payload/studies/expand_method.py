@@ -518,6 +518,7 @@ def deconflict(rbar, pairs, tgt, L, alpha, max_rounds=6000, window=300,
     feasible start for the split-plane walls)."""
     P = np.array(rbar, float)
     R = np.array(rbar, float)
+    deconflict.last_P = P            # debugging: the chain state, even on a jam
     S = None if Dm is None else np.asarray(Dm, float) + seg_h
 
     M, K = P.shape[0], P.shape[1] - 1
@@ -768,11 +769,13 @@ def seg_tubes(sc, psis, x, pairs, deltas, N, M, cap=150.0):
         z = cp.Variable(9 * N + 6)
         R = cp.reshape(z[:3 * (N + 1)], (N + 1, 3), order="C")
         cons = [A @ z == b]
-        ks = [k for k in range(1, N) if eps[j][k] < cap]
-        if ks:
-            ks = np.array(ks)
-            cons.append(cp.norm(R[ks] - np.asarray(x[j])[ks], 2, axis=1)
-                        <= np.maximum(eps[j][ks], 0.0))
+        # Every free step is constrained, with radius min(half surplus, cap).
+        # (Skipping the capped steps was unsafe: a payload with no partner
+        # within 2 cap of surplus was then unconstrained there and could
+        # swing back into another payload's corridor.)
+        ks = np.arange(1, N)
+        cons.append(cp.norm(R[ks] - np.asarray(x[j])[ks], 2, axis=1)
+                    <= np.clip(eps[j][ks], 0.0, cap))
         Fz = cp.reshape(z[6 * (N + 1):], (N, 3), order="C")
         prob = cp.Problem(cp.Minimize(cp.sum(cp.norm(Fz, 2, axis=1))), cons)
         prob.solve(solver="CLARABEL")
@@ -784,7 +787,7 @@ def seg_tubes(sc, psis, x, pairs, deltas, N, M, cap=150.0):
 
 
 def split_plane_rounds(sc, psis, P, pairs, tg, deltas, K, M, rounds=10,
-                       D=75.0):
+                       D=75.0, mass_split=False):
     """Split-plane re-plan with re-centered midpoints. The wall directions
     eta and clearances T' are fixed once from the inflation output P; each
     round, every pair's split point is re-centered at the midpoint of the
@@ -792,7 +795,18 @@ def split_plane_rounds(sc, psis, P, pairs, tg, deltas, K, M, rounds=10,
     parallel; only paired payloads exchange midpoints). The previous round's
     trajectories satisfy the new half-walls, so every round is feasible and
     safe at all times, and each payload's fuel can only decrease. Returns a
-    list of (fuel, rs) per round."""
+    list of (fuel, rs) per round.
+
+    mass_split: instead of the midpoint, split each wall entry's slack
+    g - T' (g = eta . (r_j - r_l) at the current positions, g >= T') in
+    proportion to mass: payload j keeps the share lam_j = m_j / (m_j + m_l)
+    of the slack as room to move toward l, so the heavier payload (costlier
+    to displace, since fuel is sum |F| = sum m|a|) gets more room and the
+    lighter one yields. The walls are eta . r_j >= a_j - lam_j (g - T') and
+    eta . r_l <= a_l + lam_l (g - T'), 0 apart by T'. The current positions
+    satisfy both (they sit lam_j (g - T') and lam_l (g - T') inside), so
+    feasibility, continuous-time safety and fuel monotonicity are unchanged.
+    lam = 1/2 recovers the midpoint split exactly."""
     import cvxpy as cp
     import route2_multi as r2
     W = []                                   # (j, l, k, eta, T')
@@ -841,13 +855,22 @@ def split_plane_rounds(sc, psis, P, pairs, tg, deltas, K, M, rounds=10,
         r = z[:3 * (K + 1)]
         probs.append((prob, r, rhs))
 
+    if mass_split:
+        mass = np.array([p.m for p in sc.payloads], float)
+        lam_j = mass[Ej] / (mass[Ej] + mass[El])
+    else:
+        lam_j = np.full(len(Ej), 0.5)
+    lam_l = 1.0 - lam_j
+
     cur = np.array(P, float)
     hist = []
     for _ in range(rounds):
-        # split points at the midpoints of the current positions
-        o = 0.5 * np.sum(Eeta * (cur[Ej, Ee] + cur[El, Ee]), axis=1)
-        b_j = o + Etp / 2                 # eta . r_j >= o + T'/2
-        b_l = -o + Etp / 2                # -eta . r_l >= -(o - T'/2)
+        # split each entry's slack g - T' between the pair (midpoint: 1/2 each)
+        a_j = np.sum(Eeta * cur[Ej, Ee], axis=1)
+        a_l = np.sum(Eeta * cur[El, Ee], axis=1)
+        slack = (a_j - a_l) - Etp
+        b_j = a_j - lam_j * slack         # eta . r_j >= b_j
+        b_l = -(a_l + lam_l * slack)      # -eta . r_l >= b_l
         fuel, new = 0.0, []
         for j, (prob, r, rhs) in enumerate(probs):
             if rhs is not None:
@@ -937,7 +960,7 @@ def run(M, seed, alpha, link_rho, K0=30, tf=500.0, Kmax=240, reach=np.inf,
         post_smooth=100, qp=False, failsafe=False, seg_safe=False,
         gauss_h=None, split=False, split_rounds=10, split_D=75.0,
         seg_chain=False, layout="random_seq", ring_radius=None,
-        link_floor=False, tent_h=None, engine="numba"):
+        link_floor=False, tent_h=None, engine="numba", mass_split=False):
     """h_conf: pairs whose nominals overlap (closer than delta + h at some
     timestep) get the larger target delta + h_conf, creating smoothing margin
     exactly at the kinks; all other pairs keep delta + h. ring_radius None =
@@ -1046,7 +1069,9 @@ def run(M, seed, alpha, link_rho, K0=30, tf=500.0, Kmax=240, reach=np.inf,
     if split:
         t1 = time.perf_counter()
         hist = split_plane_rounds(sck, psk, P, pairs, tg, deltas, K, M,
-                                  rounds=split_rounds, D=split_D)
+                                  rounds=split_rounds, D=split_D,
+                                  mass_split=mass_split)
+        row["mass_split"] = bool(mass_split)
         row["t_split_total"] = round(time.perf_counter() - t1, 1)
         if not hist:
             row["split_status"] = "infeasible"
@@ -1121,6 +1146,9 @@ def main():
     ap.add_argument("--split-planes", action="store_true",
                     help="also run the decoupled split-plane re-plan")
     ap.add_argument("--split-rounds", type=int, default=10)
+    ap.add_argument("--mass-split", action="store_true",
+                    help="split-plane rounds: split each wall's slack in proportion "
+                         "to mass (heavier payload gets more room) instead of the midpoint")
     ap.add_argument("--split-D", type=float, default=75.0,
                     help="keep-in radius around the inflation output; "
                          "0 = walls for every pair and step, no keep-in")
@@ -1171,7 +1199,8 @@ def main():
                             split_D=(None if a.split_D == 0 else a.split_D),
                             seg_chain=a.seg_chain, layout=a.layout,
                             ring_radius=a.ring, link_floor=a.link_floor,
-                            tent_h=a.tent_h, engine=a.engine))
+                            tent_h=a.tent_h, engine=a.engine,
+                            mass_split=a.mass_split))
     name = (f"expand_method_rho{a.link_rho:g}_h{a.h:g}"
             + ("_hconf" if a.h_confs != [None] else "")
             + ("_smooth" if a.smooth else "")

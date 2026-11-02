@@ -226,3 +226,36 @@ def test_oracle_reports_infeasible_instead_of_crashing(monkeypatch):
     out = orc_mod.run_oracle(sc, refs, [dict(), dict()], [[0], [0]], [None, None],
                              conflicts.zero_eps(sc))
     assert out["status"] == "infeasible" and "payload 0" in out["reason"]
+
+
+def test_gated_tent_projection_monotone_and_certified():
+    """Gated tent: one push is the exact projection (energy = merit term),
+    the merit is monotone, coincident points are handled, the gradient
+    fallback alone converges, and the segment certificate is reported."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "multi_payload" / "studies"))
+    import gated_tent as gt
+    N = 20
+    t = np.linspace(0, 1, N + 1)[:, None]
+    a = np.hstack([t * 100, 0 * t, 0 * t])
+    b = a.copy()
+    for k in (0, 1, N):
+        b[k] += [0, 50, 0]                       # pinned ends apart, middle coincident
+    c = np.hstack([t * 100, 0 * t + 200, 0 * t])
+    rbar, pairs = np.stack([a, b, c]), [(0, 1), (0, 2), (1, 2)]
+    tgt = {p: 30.0 for p in pairs}
+    deltas = [[20.0] * 3 for _ in range(3)]
+    for kw in (dict(), dict(max_halvings=-1)):   # sweeps; gradient fallback only
+        X, info = gt.deconflict(rbar, pairs, tgt, masses=[1, 2, 3], deltas=deltas, **kw)
+        assert X is not None and info["status"] == "converged" and info["phi_monotone"]
+        assert info["coincident"] > 0 and "seg_certified" in info
+        d = np.linalg.norm(X[0, 2:N] - X[1, 2:N], axis=1)
+        assert d.min() >= 30.0 - 0.1
+    X0, _, n, B, m, PI, PJ, TAU, W, FB = gt._setup(np.stack([a, c - [0, 190, 0]]), [(0, 1)],
+                                                  {(0, 1): 30.0}, [1, 3])
+    X1 = X0.copy()
+    gt._sweep(X1, [(0, 1)], TAU, B, m, n, 1.0, FB)
+    v = 30.0 - np.linalg.norm(X0[0, 2:n] - X0[1, 2:n], axis=1)
+    k = int(np.argmax(v))
+    assert np.isclose(gt._energy(X1 - X0, m), W[0, k] * v[k] ** 2)
