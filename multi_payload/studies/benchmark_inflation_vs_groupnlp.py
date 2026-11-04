@@ -8,9 +8,9 @@ the benchmark's reported safety criterion for all three outputs is node separati
 Every check also reports the exact between-node (segment) clearance of the
 piecewise-linear trajectories (seg_safe_*, seg_margin_*); --segment-check makes
 segment clearance part of the safety criterion. --gated-tent replaces the tent
-sweeps with the gated tent (studies/gated_tent.py: same pushes, accepted only
-under sufficient decrease of the merit function, gradient fallback; converges
-to a stationary point). --seg-tubes replaces the original node tubes with
+sweeps with segment-aware gated tent (studies/gated_tent.py: node and segment
+pushes, a window-max nonmonotone gate, and gradient fallback; history window
+defaults to 5, with --gated-window 1 restoring the monotone gate). --seg-tubes replaces the original node tubes with
 segment-sized tubes (expand_method.seg_tubes), which are safe between nodes.
 """
 from __future__ import annotations
@@ -218,7 +218,7 @@ def headroom_schedule(N,dt,peak,*,variable=False,ramp_seconds=50.):
 
 def run_inflation_instance(sc,psis,refs,deltas,*,profile='gauss',inflation_sigma=1.5,lower=None,
                            headroom=60.,variable_headroom=False,headroom_ramp_seconds=50.,mass_based_push=False,local_tent_width_seconds=None,
-                           gated_tent=False,seg_tubes=False,gated_budget=120.):
+                           gated_tent=False,seg_tubes=False,gated_budget=120.,gated_window=5):
     """Run inflation and original tubes on a prepared shared instance.
 
     Return inflation metrics only; do not generate scenarios or run group repair.
@@ -230,9 +230,11 @@ def run_inflation_instance(sc,psis,refs,deltas,*,profile='gauss',inflation_sigma
     if (mass_based_push or local_tent_width_seconds is not None or gated_tent) and profile != 'tent':
         raise ValueError('Mass-based push, local tent width and gated tent require --profile tent or --tent-only')
     if gated_tent and local_tent_width_seconds is not None:
-        raise ValueError('Gated tent uses the global tent (its convergence proof needs it); drop --local-tent-width')
+        raise ValueError('Gated tent uses the tested global tent profile; drop --local-tent-width')
     if local_tent_width_seconds is not None and (not np.isfinite(local_tent_width_seconds) or local_tent_width_seconds <= 0):
         raise ValueError('local_tent_width_seconds must be positive and finite (seconds per side)')
+    if isinstance(gated_window, (bool, np.bool_)) or not isinstance(gated_window, (int, np.integer)) or gated_window < 1:
+        raise ValueError('gated_window must be a positive integer')
     N,M=sc.N,sc.M
     headroom_schedule(N,sc.dt,headroom,variable=variable_headroom,ramp_seconds=headroom_ramp_seconds)
     pairs=list(zip(*np.triu_indices(M,1)))
@@ -243,6 +245,7 @@ def run_inflation_instance(sc,psis,refs,deltas,*,profile='gauss',inflation_sigma
              headroom_initial_m=float(headroom),
              headroom_ramp_seconds=float(headroom_ramp_seconds) if variable_headroom else 0.,
              mass_based_push=bool(mass_based_push),gated_tent=bool(gated_tent),
+             gated_window=int(gated_window) if gated_tent else None,
              tube_type='segment' if seg_tubes else 'node',
              local_tent_width_units='seconds',
              local_tent_width_nodes=float(local_tent_width_seconds/sc.dt) if local_tent_width_seconds is not None else None,
@@ -265,7 +268,8 @@ def run_inflation_instance(sc,psis,refs,deltas,*,profile='gauss',inflation_sigma
                 import gated_tent as gt
                 X,gate=gt.deconflict(rbar,pairs,targets,
                                      masses=[p.m for p in sc.payloads] if mass_based_push else None,
-                                     variant='gated',budget_s=gated_budget,deltas=deltas)
+                                     variant='gated',budget_s=gated_budget,deltas=deltas,
+                                     segment_aware=True,window=gated_window)
                 centers=None if X is None else [x for x in X]
                 sweeps,residual=gate['sweeps'],gate['worst']
             elif profile == 'tent' and (mass_based_push or local_tent_width_seconds is not None):
@@ -282,9 +286,21 @@ def run_inflation_instance(sc,psis,refs,deltas,*,profile='gauss',inflation_sigma
                         headroom_first_movable_m=float(extra[2]),
                         headroom_last_movable_m=float(extra[N-1]))
             if gate is not None:
-                detail.update(gate_status=gate['status'],gate_rejected_sweeps=gate['rejected_sweeps'],
+                detail.update(gate_status=gate['status'],
+                              gate_segment_aware=gate['segment_aware'],
+                              gate_merit_version=gate['merit_version'],
+                              gate_node_phi_final=gate['node_phi_final'],
+                              gate_segment_phi_final=gate['segment_phi_final'],
+                              gate_segment_worst=gate['segment_worst'],
+                              gate_segment_push_trials=gate['segment_push_trials'],
+                              gate_segment_buffer_m=gate['segment_buffer'],
+                              gate_rejected_sweeps=gate['rejected_sweeps'],
                               gate_halvings=gate['halvings'],gate_grad_steps=gate['grad_steps'],
                               gate_phi_monotone=gate['phi_monotone'],
+                              gate_phi_rises=gate['phi_rises'],
+                              gate_window=gate['window'],gate_policy=gate['gate_policy'],
+                              gate_envelope_final=gate['envelope_final'],
+                              gate_envelope_monotone=gate['envelope_monotone'],
                               gate_seg_certified=gate.get('seg_certified'),
                               gate_seg_margin=gate.get('seg_margin'),gate_lemma_margin=gate.get('lemma_margin'))
             attempts.append(detail)
@@ -409,7 +425,7 @@ def run_sigma_sweep(M,seed,N,tf,*,layout='random_seq',profile='gauss',ring_radiu
                  full_lbfgs=True,full_lbfgs_budget=80.,full_lbfgs_clearance=0.,
                  full_lbfgs_maxiter=90,full_lbfgs_stages=12,tent_only=False,
                  headroom=60.,variable_headroom=False,headroom_ramp_seconds=50.,mass_based_push=False,local_tent_width_seconds=None,
-                 gated_tent=False,seg_tubes=False,gated_budget=120.):
+                 gated_tent=False,seg_tubes=False,gated_budget=120.,gated_window=5):
     headroom_schedule(N,tf/N,headroom,variable=variable_headroom,ramp_seconds=headroom_ramp_seconds)
     if tent_only:
         profile='tent'
@@ -436,7 +452,8 @@ def run_sigma_sweep(M,seed,N,tf,*,layout='random_seq',profile='gauss',ring_radiu
     for attempt in range(8 if layout=='random' and ring_radius is None else 1):
         try:
             sc=scenario.generate(layout,M=M,n_points=8,n_agents=3*M,seed=seed,
-                                 nu_deg=60,N=N,tf=tf,ring_radius=ring,max_tries=5000)
+                                 nu_deg=60,N=N,tf=tf,ring_radius=ring,max_tries=5000,
+                                 resample_crossing_goals=(layout=='crossing'))
             break
         except RuntimeError as exc:
             if 'could not place payloads' not in str(exc) or layout!='random' or ring_radius is not None:
@@ -462,13 +479,16 @@ def run_sigma_sweep(M,seed,N,tf,*,layout='random_seq',profile='gauss',ring_radiu
     conflicts=sum(np.min(np.linalg.norm(rbar[i]-rbar[j],axis=1))<deltas[i,j] for i,j in pairs)
     row=dict(M=M,seed=seed,N=N,tf=tf,layout=layout,profile=profile,ring_radius=ring,
              radius_source='density_scaling' if ring_radius is None else 'explicit',
-             verification='nodes_only',verification_tolerance_m=1e-6,
+             verification='nodes_and_segments' if SEGMENT_SAFETY else 'nodes_only',verification_tolerance_m=1e-6,
              clearance='pair-specific extents plus shared margin',LB=lower,
              t_placement=placement_seconds,t_nominals=nominal_seconds,
              n_pairs=len(pairs),n_conflicts=int(conflicts),baseline_node_safe=initial['safe'],
              group_size=group_size,group_budget=group_budget,group_fuel_weight=float(group_fuel_weight),
              group_internal_verification='unchanged: full linear segments',
              objective='native sum of force norms; no dt multiplier')
+
+    if layout == 'crossing':
+        row['crossing_endpoint_attempts'] = sc.meta['crossing_endpoint_attempts']
 
     inflation_rows=[]
     for sigma in inflation_sigmas:
@@ -480,7 +500,7 @@ def run_sigma_sweep(M,seed,N,tf,*,layout='random_seq',profile='gauss',ring_radiu
             headroom=headroom,variable_headroom=variable_headroom,
             headroom_ramp_seconds=headroom_ramp_seconds,
             mass_based_push=mass_based_push,local_tent_width_seconds=local_tent_width_seconds,
-            gated_tent=gated_tent,seg_tubes=seg_tubes,gated_budget=gated_budget))
+            gated_tent=gated_tent,seg_tubes=seg_tubes,gated_budget=gated_budget,gated_window=gated_window))
     if not tent_only:
         row.update(run_groupnlp_instance(sc,psis,refs,deltas,seed=seed,
                    group_size=group_size,group_budget=group_budget,refine_group=refine_group,
@@ -552,7 +572,8 @@ def main():
     parser.add_argument('--local-tent-width-seconds','--local-tent-width',dest='local_tent_width_seconds',type=float,default=None,
                         help='Tent half-width in SECONDS on each side of the conflict peak (e.g. 133.33333333333334); default: global tent. Both flag spellings use seconds. Requires tent profile')
     parser.add_argument('--gated-tent',action='store_true',
-                        help='Gated tent (studies/gated_tent.py): tent sweeps accepted only under sufficient decrease of the merit function, with halving and gradient fallback; provably converges to a stationary point. Implies --profile tent; combine with --mass-based-push for mass weighting')
+                        help='Segment-aware gated tent (studies/gated_tent.py): node and between-node corrections accepted using a window-max nonmonotone gate (default window 5), with halving and gradient fallback; requires segment clearance before returning a reference. Implies --profile tent; combine with --mass-based-push for mass weighting')
+    parser.add_argument('--gated-window',type=int,default=5,help='Number of accepted scores in the gated-tent reference maximum (default: 5; use 1 for the monotone gate)')
     parser.add_argument('--gated-budget',type=float,default=120.,help='Gated-tent time budget per relaxation in seconds (default: 120)')
     parser.add_argument('--seg-tubes',action='store_true',
                         help='Use segment-sized tubes (radius = half the smallest segment surplus over delta; safe between nodes) instead of the original node tubes')
@@ -582,6 +603,8 @@ def main():
     parser.add_argument('--no-group-tubes'  ,action='store_true',help='Skip the added group-to-original-tubes refinement')
     parser.add_argument('--out',type=Path,default=Path(__file__).with_name('results')/'benchmark_tube_vs_groupnlp.json')
     args=parser.parse_args()
+    if args.gated_window < 1:
+        parser.error('--gated-window must be a positive integer')
     if args.tent_only:
         args.profile='tent'
         args.inflation_sigma=[[1.5]]
@@ -636,7 +659,7 @@ def main():
                                  headroom=args.headroom,variable_headroom=args.variable_headroom,
                                  headroom_ramp_seconds=args.headroom_ramp_seconds,
                                  mass_based_push=args.mass_based_push,local_tent_width_seconds=args.local_tent_width_seconds,
-                                 gated_tent=args.gated_tent,seg_tubes=args.seg_tubes,gated_budget=args.gated_budget)
+                                 gated_tent=args.gated_tent,seg_tubes=args.seg_tubes,gated_budget=args.gated_budget,gated_window=args.gated_window)
             except Exception as exc:
                 instance_rows=[dict(M=M,seed=seed,inflation_sigma=sigma,verification='nodes_only',
                                     status='setup_error',error=str(exc)) for sigma in args.inflation_sigma]

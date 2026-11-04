@@ -109,12 +109,16 @@ def generate(layout: str = "crossing", M: int = 3, n_points: int = 6,
              n_agents: int | None = None, seed: int = 0,
              nu_deg: float = 60.0, ring_radius: float = 500.0,
              tf: float | None = None, N: int | None = None,
-             delta_margin: float = 10.0, max_tries: int = 1000) -> MultiPayloadScenario:
+             delta_margin: float = 10.0, max_tries: int = 1000,
+             resample_crossing_goals: bool = False) -> MultiPayloadScenario:
     """Draw a multi-payload scenario.
 
     layout="crossing": starts evenly spaced on a ring (random plane through the
       origin), goals diametrically across with small jitter, so straight paths
       cross near the center and the repair step is exercised.
+      With resample_crossing_goals=True, reject unsafe goal jitter and redraw
+      only the goal angles, up to max_tries; bodies, starts, plane and radius
+      stay fixed. Already-valid seeds retain their original scenario.
     layout="random": starts and goals uniform in a ball of radius ring_radius,
       rejection-sampled so starts (and goals) are pairwise >= delta + margin.
     tf, N default to the paper's generator: tf ~ U(300, 900) s, N = max(20, tf/10).
@@ -139,22 +143,34 @@ def generate(layout: str = "crossing", M: int = 3, n_points: int = 6,
         w = np.cross(u, np_rng.standard_normal(3))
         w /= np.linalg.norm(w)
         phase = rng.uniform(0, 2 * np.pi)
-        starts, goals = [], []
-        for j in range(M):
-            th = phase + 2 * np.pi * j / M
-            jit = rng.uniform(-0.25, 0.25) * np.pi / M
-            starts.append(ring_radius * (np.cos(th) * u + np.sin(th) * w))
-            goals.append(-ring_radius * (np.cos(th + jit) * u + np.sin(th + jit) * w))
         if M > 1 and 2 * ring_radius * np.sin(np.pi / M) < sep:
             raise ValueError("ring too small for the payload extents: increase ring_radius")
-        # The goal jitter can bring neighbouring goals up to half the ring
-        # spacing closer, so check the actual endpoints: a pinned pair closer
-        # than delta makes the instance infeasible for every method.
-        for pts in (starts, goals):
-            if any(np.linalg.norm(pts[i] - pts[k]) < delta
-                   for i in range(M) for k in range(i + 1, M)):
-                raise ValueError("jittered crossing endpoints closer than the "
-                                 "clearance: increase ring_radius or change seed")
+        if resample_crossing_goals and max_tries < 1:
+            raise ValueError("max_tries must be positive when resampling crossing goals")
+        starts = [ring_radius * (np.cos(phase + 2 * np.pi * j / M) * u
+                               + np.sin(phase + 2 * np.pi * j / M) * w)
+                  for j in range(M)]
+        # Reject the whole jitter vector, preserving the original joint draw
+        # conditioned on valid endpoints. Never alter the bodies or radius.
+        for endpoint_attempt in range(max_tries if resample_crossing_goals else 1):
+            goals = []
+            for j in range(M):
+                th = phase + 2 * np.pi * j / M
+                jit = rng.uniform(-0.25, 0.25) * np.pi / M
+                goals.append(-ring_radius * (np.cos(th + jit) * u + np.sin(th + jit) * w))
+            endpoints_clear = all(
+                np.linalg.norm(pts[i] - pts[k]) >= delta
+                for pts in (starts, goals)
+                for i in range(M) for k in range(i + 1, M))
+            if endpoints_clear:
+                break
+        else:
+            if resample_crossing_goals:
+                raise RuntimeError(
+                    f"could not place clearance-safe crossing goals after {max_tries} "
+                    "jitter draws: increase ring_radius or max_tries")
+            raise ValueError("jittered crossing endpoints closer than the "
+                             "clearance: increase ring_radius or change seed")
     elif layout == "random":
         def draw_set():
             for _ in range(max_tries):
@@ -215,7 +231,9 @@ def generate(layout: str = "crossing", M: int = 3, n_points: int = 6,
         delta=delta, n_agents=n_agents if n_agents is not None else 3 * M,
         payloads=payloads,
         meta=dict(layout=layout, seed=seed, nu_deg=nu_deg, n_points=n_points,
-                  ring_radius=ring_radius))
+                  ring_radius=ring_radius,
+                  **({"crossing_endpoint_attempts": endpoint_attempt + 1}
+                     if layout == "crossing" else {})))
 
 
 def to_dict(sc: MultiPayloadScenario) -> dict:
